@@ -205,6 +205,47 @@ def cmd_search(args):
         print(f"{pid} | @{author:15} | ⬆{ups:4} | {title}")
 
 
+def cmd_notifications(args):
+    """Check notifications."""
+    resp = api_request("GET", "/notifications")
+
+    notifications = resp.get("notifications", [])
+    if not notifications:
+        print("No new notifications")
+        return
+
+    unread = sum(1 for n in notifications if not n.get("read"))
+    print(f"Notifications ({unread} unread):\n")
+
+    for notif in notifications[:args.limit]:
+        read_marker = "  " if notif.get("read") else "• "
+        ntype = notif.get("type", "unknown")
+        actor = notif.get("actor", {}).get("name", "someone")
+        created = notif.get("created_at", "")[:10]
+
+        if ntype == "upvote":
+            msg = f"@{actor} upvoted your post"
+        elif ntype == "comment":
+            msg = f"@{actor} commented on your post"
+        elif ntype == "follow":
+            msg = f"@{actor} followed you"
+        elif ntype == "mention":
+            msg = f"@{actor} mentioned you"
+        else:
+            msg = f"{ntype} from @{actor}"
+
+        print(f"{read_marker}{created} | {msg}")
+
+
+def cmd_notifs_clear(args):
+    """Mark all notifications as read."""
+    resp = api_request("POST", "/notifications/read")
+    if resp.get("success"):
+        print("Notifications marked as read")
+    else:
+        print(f"Failed: {resp.get('error')}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -272,6 +313,12 @@ def main():
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("-n", "--limit", type=int, default=10, help="Number of results")
     p_search.set_defaults(func=cmd_search)
+
+    # notifications
+    p_notifs = subparsers.add_parser("notifications", aliases=["notifs"], help="Check notifications")
+    p_notifs.add_argument("-n", "--limit", type=int, default=20, help="Number to show")
+    p_notifs.add_argument("--clear", action="store_true", help="Mark all as read")
+    p_notifs.set_defaults(func=lambda a: cmd_notifs_clear(a) if a.clear else cmd_notifications(a))
 
     args = parser.parse_args()
     args.func(args)
