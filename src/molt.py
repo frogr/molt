@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -347,30 +347,66 @@ def cmd_unfollow(args):
 def cmd_agent(args):
     """View an agent's profile."""
     username = args.username.lstrip("@")
-    resp = api_request("GET", f"/agents/{username}")
-    agent = resp.get("agent", {})
-    stats = agent.get("stats", {})
 
-    print(f"@{agent.get('name')}")
-    print(f"Karma: {agent.get('karma', 0)}")
-    print(f"Posts: {stats.get('posts', 0)} | Comments: {stats.get('comments', 0)}")
-    if agent.get('description'):
-        print(f"\n{agent['description']}")
+    # Try direct endpoint first
+    resp = api_request_safe("GET", f"/agents/{username}")
+    if resp and resp.get("agent"):
+        agent = resp.get("agent", {})
+        stats = agent.get("stats", {})
+        print(f"@{agent.get('name')}")
+        print(f"Karma: {agent.get('karma', 0)}")
+        print(f"Posts: {stats.get('posts', 0)} | Comments: {stats.get('comments', 0)}")
+        if agent.get('description'):
+            print(f"\n{agent['description']}")
+        return
+
+    # Fallback: search in feed for this author
+    resp = api_request_safe("GET", "/posts?limit=200&sort=new")
+    if resp:
+        posts = resp.get("posts", [])
+        for post in posts:
+            author = post.get("author", {})
+            if author.get("name", "").lower() == username.lower():
+                print(f"@{author.get('name')}")
+                karma = author.get("karma", "?")
+                print(f"Karma: {karma}")
+                if author.get("description"):
+                    print(f"\n{author['description']}")
+                print("\n(Note: Full stats unavailable - using feed data)")
+                return
+
+    print(f"Agent @{username} not found in recent feed")
 
 
 def cmd_search(args):
     """Search posts."""
-    query = args.query
+    query = args.query.lower()
     limit = args.limit or 10
-    resp = api_request("GET", f"/posts/search?q={query}&limit={limit}")
 
-    posts = resp.get("posts", [])
-    if not posts:
-        print(f"No posts found for '{query}'")
+    # The /posts/search endpoint no longer exists
+    # Workaround: fetch a large batch of posts and filter client-side
+    resp = api_request_safe("GET", "/posts?limit=300&sort=new")
+    if not resp:
+        print("Could not fetch posts. Search API unavailable.")
         return
 
-    print(f"Found {len(posts)} posts:\n")
-    for post in posts:
+    all_posts = resp.get("posts", [])
+    # Simple text search in title and content
+    matching = []
+    for post in all_posts:
+        title = (post.get("title") or "").lower()
+        content = (post.get("content") or "").lower()
+        if query in title or query in content:
+            matching.append(post)
+            if len(matching) >= limit:
+                break
+
+    if not matching:
+        print(f"No posts found matching '{args.query}' in recent feed")
+        return
+
+    print(f"Found {len(matching)} matching posts:\n")
+    for post in matching:
         author = post.get("author", {}).get("name", "?")
         title = post.get("title", "")[:50]
         ups = post.get("upvotes", 0)
@@ -380,7 +416,12 @@ def cmd_search(args):
 
 def cmd_notifications(args):
     """Check notifications."""
-    resp = api_request("GET", "/notifications")
+    resp = api_request_safe("GET", "/notifications")
+
+    if resp is None:
+        print("Notifications endpoint unavailable.")
+        print("The Moltbook API may have changed.")
+        return
 
     notifications = resp.get("notifications", [])
     if not notifications:
@@ -1565,17 +1606,27 @@ def cmd_myposts(args):
         print("Could not determine your username")
         return
 
-    # Get posts by this agent
+    # The /agents/{username}/posts endpoint no longer exists
+    # Workaround: scan through the feed and filter for our posts
+    # We fetch more posts than requested to find enough of ours
     limit = args.limit or 10
-    resp = api_request("GET", f"/agents/{username}/posts?limit={limit}")
-    posts = resp.get("posts", [])
+    fetch_limit = min(limit * 20, 500)  # Fetch up to 500 posts to scan
 
-    if not posts:
-        print("You haven't posted anything yet!")
+    resp = api_request_safe("GET", f"/posts?limit={fetch_limit}&sort=new")
+    if not resp:
+        print("Could not fetch posts. The API may be unavailable.")
+        return
+
+    all_posts = resp.get("posts", [])
+    my_posts = [p for p in all_posts if p.get("author", {}).get("name") == username][:limit]
+
+    if not my_posts:
+        print(f"No posts found for @{username} in recent feed.")
+        print("Try 'molt export' to view your locally cached posts.")
         return
 
     print(f"Your posts (@{username}):\n")
-    for post in posts:
+    for post in my_posts:
         title = post.get("title", "")[:50]
         ups = post.get("upvotes", 0)
         comments = post.get("comment_count", 0)
@@ -1686,35 +1737,69 @@ def cmd_agents(args):
     api_sort = sort_map.get(sort, "karma")
 
     resp = api_request_safe("GET", f"/agents?limit={limit}&sort={api_sort}")
+    if resp and resp.get("agents"):
+        agents = resp.get("agents", [])
+        title = "Leaderboard" if sort == "karma" else f"Agents (by {sort})"
+        print(f"=== {title} ===\n")
+
+        for i, agent in enumerate(agents, 1):
+            name = agent.get("name", "?")
+            karma = agent.get("karma", 0)
+            stats = agent.get("stats", {})
+            posts = stats.get("posts", 0)
+            comments = stats.get("comments", 0)
+            desc = (agent.get("description") or "")[:35]
+
+            if i <= 3:
+                rank = ["", "1st", "2nd", "3rd"][i]
+            else:
+                rank = f"{i}th"
+
+            print(f"{rank:>4} | @{name:15} | {karma:>4} karma | {posts:>3}p {comments:>3}c | {desc}")
+
+        print(f"\n=== {len(agents)} agents shown ===")
+        return
+
+    # Fallback: extract unique authors from feed
+    print("Leaderboard API unavailable. Scanning recent feed for active agents...\n")
+    resp = api_request_safe("GET", "/posts?limit=500&sort=new")
     if not resp:
-        print("Could not fetch agents")
+        print("Could not fetch feed data")
         return
 
-    agents = resp.get("agents", [])
-    if not agents:
-        print("No agents found")
-        return
+    posts = resp.get("posts", [])
+    agent_data = {}
+    for post in posts:
+        author = post.get("author", {})
+        name = author.get("name")
+        if not name:
+            continue
+        if name not in agent_data:
+            agent_data[name] = {
+                "name": name,
+                "karma": author.get("karma", 0),
+                "description": author.get("description", ""),
+                "post_count": 0
+            }
+        agent_data[name]["post_count"] += 1
 
-    title = "Leaderboard" if sort == "karma" else f"Agents (by {sort})"
-    print(f"=== {title} ===\n")
+    agents = sorted(agent_data.values(), key=lambda x: x["karma"], reverse=True)[:limit]
 
+    print("=== Active Agents (from feed) ===\n")
     for i, agent in enumerate(agents, 1):
-        name = agent.get("name", "?")
-        karma = agent.get("karma", 0)
-        stats = agent.get("stats", {})
-        posts = stats.get("posts", 0)
-        comments = stats.get("comments", 0)
+        name = agent["name"]
+        karma = agent["karma"]
+        posts = agent["post_count"]
         desc = (agent.get("description") or "")[:35]
 
-        # Rank formatting
         if i <= 3:
             rank = ["", "1st", "2nd", "3rd"][i]
         else:
             rank = f"{i}th"
 
-        print(f"{rank:>4} | @{name:15} | {karma:>4} karma | {posts:>3}p {comments:>3}c | {desc}")
+        print(f"{rank:>4} | @{name:15} | {karma:>4} karma | {posts:>3} recent posts | {desc}")
 
-    print(f"\n=== {len(agents)} agents shown ===")
+    print(f"\n=== {len(agents)} agents shown (from recent feed) ===")
 
 
 def cmd_analyze(args):
