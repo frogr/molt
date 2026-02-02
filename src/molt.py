@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -20,6 +20,8 @@ POST_CACHE = CONFIG_DIR / "post_cache.json"
 BOOKMARKS_FILE = CONFIG_DIR / "bookmarks.json"
 DRAFTS_FILE = CONFIG_DIR / "drafts.json"
 SCHEDULED_FILE = CONFIG_DIR / "scheduled.json"
+QUEUE_DIR = CONFIG_DIR / "queue"
+QUEUE_ARCHIVE = QUEUE_DIR / "posted"
 API_BASE = "https://www.moltbook.com/api/v1"
 
 # Default signature - can be overridden in config
@@ -1183,6 +1185,240 @@ def cmd_scheduled_clear(args):
     print(f"Cleared {count} scheduled posts")
 
 
+# ===== QUEUE MANAGEMENT (FILE-BASED) =====
+
+def parse_frontmatter(content):
+    """Parse YAML frontmatter from markdown content.
+
+    Returns (metadata_dict, body_content).
+    """
+    import re
+
+    # Check for frontmatter
+    fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)$', content, re.DOTALL)
+    if not fm_match:
+        return {}, content
+
+    fm_text = fm_match.group(1)
+    body = fm_match.group(2)
+
+    # Simple YAML parsing (key: value)
+    metadata = {}
+    for line in fm_text.split('\n'):
+        if ':' in line:
+            key, _, value = line.partition(':')
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value:
+                metadata[key] = value
+
+    return metadata, body
+
+
+def cmd_queue_list(args):
+    """List files in the queue directory."""
+    if not QUEUE_DIR.exists():
+        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Queue directory created at: {QUEUE_DIR}")
+        print("Add markdown files with YAML frontmatter to queue posts.")
+        return
+
+    md_files = sorted(QUEUE_DIR.glob("*.md"))
+    if not md_files:
+        print(f"Queue empty. Add .md files to: {QUEUE_DIR}")
+        print("\nExpected format:")
+        print("  ---")
+        print("  title: My Post Title")
+        print("  submolt: self")
+        print("  priority: 1")
+        print("  ---")
+        print("  Post content here...")
+        return
+
+    print(f"Queue ({len(md_files)} posts):\n")
+
+    for f in md_files:
+        try:
+            content = f.read_text()
+            meta, body = parse_frontmatter(content)
+            title = meta.get('title', f.stem)[:40]
+            submolt = meta.get('submolt', 'self')
+            priority = meta.get('priority', '-')
+            print(f"  {f.name:30} | m/{submolt:10} | P{priority} | {title}")
+        except Exception as e:
+            print(f"  {f.name:30} | ERROR: {e}")
+
+
+def cmd_queue_show(args):
+    """Show a queued post's content."""
+    queue_file = QUEUE_DIR / args.filename
+    if not queue_file.exists():
+        # Try adding .md extension
+        queue_file = QUEUE_DIR / f"{args.filename}.md"
+
+    if not queue_file.exists():
+        print(f"File not found: {args.filename}")
+        print(f"Looking in: {QUEUE_DIR}")
+        return
+
+    content = queue_file.read_text()
+    meta, body = parse_frontmatter(content)
+
+    title = meta.get('title', queue_file.stem)
+    submolt = meta.get('submolt', 'self')
+
+    print(f"# {title}")
+    print(f"File: {queue_file.name}")
+    print(f"Submolt: m/{submolt}")
+    if 'priority' in meta:
+        print(f"Priority: {meta['priority']}")
+    print()
+    print(body.strip())
+
+
+def cmd_queue_add(args):
+    """Create a new queue file from arguments."""
+    import uuid
+
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Generate filename from title
+    safe_title = "".join(c if c.isalnum() or c in ' -_' else '' for c in args.title)
+    safe_title = safe_title.replace(' ', '-').lower()[:50]
+    filename = f"{safe_title}.md"
+
+    # Avoid overwrites
+    queue_file = QUEUE_DIR / filename
+    if queue_file.exists():
+        filename = f"{safe_title}-{str(uuid.uuid4())[:4]}.md"
+        queue_file = QUEUE_DIR / filename
+
+    # Build content with frontmatter
+    fm_lines = [
+        "---",
+        f"title: {args.title}",
+        f"submolt: {args.submolt or 'self'}",
+    ]
+    if args.priority:
+        fm_lines.append(f"priority: {args.priority}")
+    fm_lines.append("---")
+    fm_lines.append("")
+    fm_lines.append(args.content)
+
+    queue_file.write_text("\n".join(fm_lines))
+
+    print(f"Queued: {filename}")
+    print(f"  Title: {args.title}")
+    print(f"  Submolt: m/{args.submolt or 'self'}")
+    print(f"  Path: {queue_file}")
+
+
+def cmd_queue_publish(args):
+    """Publish from queue (first file or specific file)."""
+    if not QUEUE_DIR.exists():
+        print(f"Queue directory not found: {QUEUE_DIR}")
+        return
+
+    # Find file to publish
+    if args.filename:
+        queue_file = QUEUE_DIR / args.filename
+        if not queue_file.exists():
+            queue_file = QUEUE_DIR / f"{args.filename}.md"
+        if not queue_file.exists():
+            print(f"File not found: {args.filename}")
+            return
+    else:
+        # Get first file by priority then name
+        md_files = sorted(QUEUE_DIR.glob("*.md"))
+        if not md_files:
+            print("Queue empty")
+            return
+
+        # Sort by priority (lower first), then name
+        def sort_key(f):
+            try:
+                content = f.read_text()
+                meta, _ = parse_frontmatter(content)
+                priority = int(meta.get('priority', 999))
+            except:
+                priority = 999
+            return (priority, f.name)
+
+        md_files.sort(key=sort_key)
+        queue_file = md_files[0]
+
+    # Parse the file
+    content = queue_file.read_text()
+    meta, body = parse_frontmatter(content)
+
+    title = meta.get('title', queue_file.stem)
+    submolt = meta.get('submolt', 'self')
+    post_content = body.strip()
+
+    # Add signature if configured
+    sig = get_signature()
+    if sig and not args.no_sig:
+        post_content = f"{post_content}\n\n---\n{sig}"
+
+    # Post it
+    data = {
+        "title": title,
+        "content": post_content,
+        "submolt": submolt
+    }
+
+    try:
+        resp = api_request("POST", "/posts", data)
+        if resp.get("success"):
+            result = resp.get("post", {})
+            print(f"Published: {title}")
+            print(f"  URL: https://moltbook.com/post/{result.get('id')}")
+
+            # Archive the file
+            QUEUE_ARCHIVE.mkdir(parents=True, exist_ok=True)
+            archive_path = QUEUE_ARCHIVE / queue_file.name
+            # Avoid overwrites in archive
+            if archive_path.exists():
+                import uuid
+                archive_path = QUEUE_ARCHIVE / f"{queue_file.stem}-{str(uuid.uuid4())[:4]}.md"
+            queue_file.rename(archive_path)
+            print(f"  Archived to: {archive_path}")
+        else:
+            print(f"Failed: {resp.get('error')}")
+    except SystemExit:
+        print("Failed to publish")
+
+
+def cmd_queue_delete(args):
+    """Delete a file from the queue."""
+    queue_file = QUEUE_DIR / args.filename
+    if not queue_file.exists():
+        queue_file = QUEUE_DIR / f"{args.filename}.md"
+
+    if not queue_file.exists():
+        print(f"File not found: {args.filename}")
+        return
+
+    queue_file.unlink()
+    print(f"Deleted: {args.filename}")
+
+
+def cmd_queue_clear(args):
+    """Clear all files from the queue."""
+    if not QUEUE_DIR.exists():
+        print("Queue directory not found")
+        return
+
+    md_files = list(QUEUE_DIR.glob("*.md"))
+    if not md_files:
+        print("Queue already empty")
+        return
+
+    for f in md_files:
+        f.unlink()
+    print(f"Cleared {len(md_files)} files from queue")
+
+
 def api_request_safe(method, endpoint, data=None):
     """Make API request that returns None on error instead of exiting."""
     url = f"{API_BASE}{endpoint}"
@@ -1898,6 +2134,38 @@ def main():
     # scheduled-clear - clear all scheduled posts
     p_sched_clear = subparsers.add_parser("scheduled-clear", help="Clear all scheduled posts")
     p_sched_clear.set_defaults(func=cmd_scheduled_clear)
+
+    # queue - list queued posts (file-based)
+    p_queue = subparsers.add_parser("queue", aliases=["q"], help="List queued posts (file-based)")
+    p_queue.set_defaults(func=cmd_queue_list)
+
+    # queue-show - view a queued post
+    p_queue_show = subparsers.add_parser("queue-show", help="Show a queued post's content")
+    p_queue_show.add_argument("filename", help="Filename (with or without .md)")
+    p_queue_show.set_defaults(func=cmd_queue_show)
+
+    # queue-add - create a new queue file
+    p_queue_add = subparsers.add_parser("queue-add", help="Add a post to the queue")
+    p_queue_add.add_argument("title", help="Post title")
+    p_queue_add.add_argument("content", help="Post content (markdown)")
+    p_queue_add.add_argument("--submolt", "-m", default="self", help="Submolt (default: self)")
+    p_queue_add.add_argument("--priority", "-p", type=int, help="Priority (lower = first)")
+    p_queue_add.set_defaults(func=cmd_queue_add)
+
+    # queue-publish - publish from queue
+    p_queue_pub = subparsers.add_parser("queue-publish", help="Publish from queue (first by priority)")
+    p_queue_pub.add_argument("filename", nargs="?", help="Specific file (default: first by priority)")
+    p_queue_pub.add_argument("--no-sig", action="store_true", help="Don't append signature")
+    p_queue_pub.set_defaults(func=cmd_queue_publish)
+
+    # queue-delete - delete a queued file
+    p_queue_del = subparsers.add_parser("queue-delete", help="Delete a queued post")
+    p_queue_del.add_argument("filename", help="Filename to delete")
+    p_queue_del.set_defaults(func=cmd_queue_delete)
+
+    # queue-clear - clear all queued posts
+    p_queue_clear = subparsers.add_parser("queue-clear", help="Clear all queued posts")
+    p_queue_clear.set_defaults(func=cmd_queue_clear)
 
     # version - show version explicitly
     p_version = subparsers.add_parser("version", help="Show version")
