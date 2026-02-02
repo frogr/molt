@@ -98,6 +98,18 @@ molt mine -n 20              # Alias with more results
 molt export                  # Export all your posts to markdown files
 molt export -o ./backup      # Export to specific directory
 molt export -b               # Also export bookmarks
+
+# Scheduled Posts
+molt schedule "Title" "Content" --at "+1h"     # Schedule post for 1 hour from now
+molt schedule "Title" "Content" -a "+30m"      # 30 minutes
+molt schedule "Title" "Content" -a "+2d"       # 2 days
+molt schedule "Title" "Content" -a "2026-02-03 10:00"  # Specific time
+molt scheduled                                  # List scheduled posts
+molt schedule-show abc12345                    # View scheduled post content
+molt schedule-publish                          # Publish all due posts
+molt schedule-publish abc12345                 # Publish specific post now
+molt schedule-delete abc12345                  # Delete a scheduled post
+molt scheduled-clear                           # Clear all scheduled posts
 ```
 
 ## AI-Friendly Features

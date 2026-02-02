@@ -12,13 +12,14 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 POST_CACHE = CONFIG_DIR / "post_cache.json"
 BOOKMARKS_FILE = CONFIG_DIR / "bookmarks.json"
 DRAFTS_FILE = CONFIG_DIR / "drafts.json"
+SCHEDULED_FILE = CONFIG_DIR / "scheduled.json"
 API_BASE = "https://www.moltbook.com/api/v1"
 
 # Default signature - can be overridden in config
@@ -899,6 +900,226 @@ def cmd_drafts_clear(args):
     print(f"Cleared {count} drafts")
 
 
+def load_scheduled():
+    """Load scheduled posts from disk."""
+    if not SCHEDULED_FILE.exists():
+        return []
+    try:
+        with open(SCHEDULED_FILE) as f:
+            return json.load(f)
+    except:
+        return []
+
+
+def save_scheduled(scheduled):
+    """Save scheduled posts to disk."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    with open(SCHEDULED_FILE, "w") as f:
+        json.dump(scheduled, f, indent=2)
+
+
+def parse_schedule_time(time_str):
+    """Parse schedule time string to unix timestamp.
+
+    Accepts:
+    - ISO format: 2026-02-03T10:00:00
+    - Date + time: 2026-02-03 10:00
+    - Relative: +1h, +30m, +2d
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    # Relative time
+    rel_match = re.match(r'^\+(\d+)([mhd])$', time_str.strip())
+    if rel_match:
+        amount = int(rel_match.group(1))
+        unit = rel_match.group(2)
+        now = datetime.now()
+        if unit == 'm':
+            target = now + timedelta(minutes=amount)
+        elif unit == 'h':
+            target = now + timedelta(hours=amount)
+        elif unit == 'd':
+            target = now + timedelta(days=amount)
+        return int(target.timestamp())
+
+    # ISO format or date + time
+    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+        try:
+            dt = datetime.strptime(time_str.strip(), fmt)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+
+    raise ValueError(f"Could not parse time: {time_str}")
+
+
+def cmd_schedule_create(args):
+    """Schedule a post for later."""
+    import uuid
+
+    try:
+        scheduled_at = parse_schedule_time(args.at)
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("Formats: '2026-02-03 10:00', '+1h', '+30m', '+2d'")
+        return
+
+    from datetime import datetime
+    scheduled_dt = datetime.fromtimestamp(scheduled_at)
+    if scheduled_at <= int(datetime.now().timestamp()):
+        print("Error: Scheduled time must be in the future")
+        return
+
+    scheduled = load_scheduled()
+    post_id = str(uuid.uuid4())[:8]
+
+    scheduled.append({
+        "id": post_id,
+        "title": args.title,
+        "content": args.content,
+        "submolt": args.submolt or "self",
+        "scheduled_at": scheduled_at,
+        "created_at": int(datetime.now().timestamp())
+    })
+    save_scheduled(scheduled)
+
+    print(f"Scheduled: {post_id}")
+    print(f"  Title: {args.title}")
+    print(f"  Submolt: m/{args.submolt or 'self'}")
+    print(f"  Publish at: {scheduled_dt.strftime('%Y-%m-%d %H:%M')}")
+
+
+def cmd_scheduled_list(args):
+    """List scheduled posts."""
+    from datetime import datetime
+    scheduled = load_scheduled()
+
+    if not scheduled:
+        print("No scheduled posts. Create one with 'molt schedule \"Title\" \"Content\" --at \"+1h\"'")
+        return
+
+    # Sort by scheduled time
+    scheduled.sort(key=lambda x: x.get("scheduled_at", 0))
+
+    now = int(datetime.now().timestamp())
+    print(f"Scheduled Posts ({len(scheduled)}):\n")
+
+    for s in scheduled:
+        sid = s.get("id", "?")
+        title = s.get("title", "")[:40]
+        submolt = s.get("submolt", "self")
+        scheduled_at = s.get("scheduled_at", 0)
+        scheduled_dt = datetime.fromtimestamp(scheduled_at)
+
+        # Mark if due
+        due_marker = "DUE! " if scheduled_at <= now else ""
+
+        print(f"  {due_marker}{sid} | m/{submolt:10} | {scheduled_dt.strftime('%Y-%m-%d %H:%M')} | {title}")
+
+
+def cmd_schedule_show(args):
+    """Show a scheduled post's content."""
+    from datetime import datetime
+    scheduled = load_scheduled()
+    post = next((s for s in scheduled if s.get("id") == args.schedule_id), None)
+
+    if not post:
+        print(f"Scheduled post not found: {args.schedule_id}")
+        return
+
+    scheduled_dt = datetime.fromtimestamp(post.get("scheduled_at", 0))
+    print(f"# {post.get('title')}")
+    print(f"Submolt: m/{post.get('submolt', 'self')}")
+    print(f"Scheduled for: {scheduled_dt.strftime('%Y-%m-%d %H:%M')}")
+    print()
+    print(post.get("content", ""))
+
+
+def cmd_schedule_publish(args):
+    """Publish all due scheduled posts (or specific one)."""
+    from datetime import datetime
+
+    scheduled = load_scheduled()
+    if not scheduled:
+        print("No scheduled posts")
+        return
+
+    now = int(datetime.now().timestamp())
+
+    # If specific ID provided, publish just that one
+    if args.schedule_id:
+        post = next((s for s in scheduled if s.get("id") == args.schedule_id), None)
+        if not post:
+            print(f"Scheduled post not found: {args.schedule_id}")
+            return
+        posts_to_publish = [post]
+    else:
+        # Find all due posts
+        posts_to_publish = [s for s in scheduled if s.get("scheduled_at", 0) <= now]
+
+    if not posts_to_publish:
+        print("No posts due for publishing")
+        return
+
+    published_ids = []
+    for post in posts_to_publish:
+        content = post.get("content", "")
+
+        # Add signature if configured
+        sig = get_signature()
+        if sig:
+            content = f"{content}\n\n---\n{sig}"
+
+        data = {
+            "title": post.get("title"),
+            "content": content,
+            "submolt": post.get("submolt", "self")
+        }
+
+        try:
+            resp = api_request("POST", "/posts", data)
+            if resp.get("success"):
+                result = resp.get("post", {})
+                print(f"Published: {post.get('title')[:40]}")
+                print(f"  URL: https://moltbook.com/post/{result.get('id')}")
+                published_ids.append(post.get("id"))
+            else:
+                print(f"Failed to publish {post.get('id')}: {resp.get('error')}")
+        except SystemExit:
+            print(f"Failed to publish {post.get('id')}")
+
+    # Remove published posts
+    if published_ids:
+        scheduled = [s for s in scheduled if s.get("id") not in published_ids]
+        save_scheduled(scheduled)
+        print(f"\nPublished {len(published_ids)} post(s)")
+
+
+def cmd_schedule_delete(args):
+    """Delete a scheduled post."""
+    scheduled = load_scheduled()
+    original_len = len(scheduled)
+    scheduled = [s for s in scheduled if s.get("id") != args.schedule_id]
+
+    if len(scheduled) < original_len:
+        save_scheduled(scheduled)
+        print(f"Deleted scheduled post: {args.schedule_id}")
+    else:
+        print(f"Scheduled post not found: {args.schedule_id}")
+
+
+def cmd_scheduled_clear(args):
+    """Clear all scheduled posts."""
+    scheduled = load_scheduled()
+    count = len(scheduled)
+    if count == 0:
+        print("No scheduled posts to clear")
+        return
+    save_scheduled([])
+    print(f"Cleared {count} scheduled posts")
+
+
 def api_request_safe(method, endpoint, data=None):
     """Make API request that returns None on error instead of exiting."""
     url = f"{API_BASE}{endpoint}"
@@ -1576,6 +1797,37 @@ def main():
     # drafts-clear - clear all drafts
     p_drafts_clear = subparsers.add_parser("drafts-clear", help="Clear all drafts")
     p_drafts_clear.set_defaults(func=cmd_drafts_clear)
+
+    # schedule - schedule a post for later
+    p_schedule = subparsers.add_parser("schedule", aliases=["sched"], help="Schedule a post for later")
+    p_schedule.add_argument("title", help="Post title")
+    p_schedule.add_argument("content", help="Post content (markdown)")
+    p_schedule.add_argument("--at", "-a", required=True, help="When to post (e.g., '2026-02-03 10:00', '+1h', '+30m', '+2d')")
+    p_schedule.add_argument("--submolt", "-m", default="self", help="Submolt (default: self)")
+    p_schedule.set_defaults(func=cmd_schedule_create)
+
+    # scheduled - list scheduled posts
+    p_scheduled = subparsers.add_parser("scheduled", help="List scheduled posts")
+    p_scheduled.set_defaults(func=cmd_scheduled_list)
+
+    # schedule-show - view a scheduled post
+    p_sched_show = subparsers.add_parser("schedule-show", help="Show a scheduled post's content")
+    p_sched_show.add_argument("schedule_id", help="Schedule ID")
+    p_sched_show.set_defaults(func=cmd_schedule_show)
+
+    # schedule-publish - publish due scheduled posts
+    p_sched_pub = subparsers.add_parser("schedule-publish", help="Publish due scheduled posts (or specific one)")
+    p_sched_pub.add_argument("schedule_id", nargs="?", help="Specific ID to publish (default: all due)")
+    p_sched_pub.set_defaults(func=cmd_schedule_publish)
+
+    # schedule-delete - delete a scheduled post
+    p_sched_del = subparsers.add_parser("schedule-delete", help="Delete a scheduled post")
+    p_sched_del.add_argument("schedule_id", help="Schedule ID to delete")
+    p_sched_del.set_defaults(func=cmd_schedule_delete)
+
+    # scheduled-clear - clear all scheduled posts
+    p_sched_clear = subparsers.add_parser("scheduled-clear", help="Clear all scheduled posts")
+    p_sched_clear.set_defaults(func=cmd_scheduled_clear)
 
     # version - show version explicitly
     p_version = subparsers.add_parser("version", help="Show version")
