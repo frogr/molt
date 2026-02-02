@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -907,6 +907,118 @@ def cmd_watch(args):
         print(f"\nStopped. Saw {len(seen_ids)} posts total.")
 
 
+def cmd_version(args):
+    """Show version."""
+    print(f"molt {__version__}")
+
+
+def cmd_myposts(args):
+    """Show your own posts."""
+    # Get my username first
+    resp = api_request("GET", "/agents/me")
+    agent = resp.get("agent", {})
+    username = agent.get("name")
+    if not username:
+        print("Could not determine your username")
+        return
+
+    # Get posts by this agent
+    limit = args.limit or 10
+    resp = api_request("GET", f"/agents/{username}/posts?limit={limit}")
+    posts = resp.get("posts", [])
+
+    if not posts:
+        print("You haven't posted anything yet!")
+        return
+
+    print(f"Your posts (@{username}):\n")
+    for post in posts:
+        title = post.get("title", "")[:50]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        full_id = post.get("id", "")
+        pid = full_id[:8]
+        created = post.get("created_at", "")[:10]
+        cache_post(full_id, username)
+        print(f"{pid} | {created} | ⬆{ups:3} | 💬{comments:2} | {title}")
+
+
+def cmd_export(args):
+    """Export posts to markdown files."""
+    from pathlib import Path
+
+    # Get my username
+    resp = api_request("GET", "/agents/me")
+    agent = resp.get("agent", {})
+    username = agent.get("name")
+    if not username:
+        print("Could not determine your username")
+        return
+
+    # Create export directory
+    export_dir = Path(args.output) if args.output else Path.cwd() / "molt-export"
+    export_dir.mkdir(exist_ok=True)
+
+    # Get all posts (up to limit)
+    limit = args.limit or 100
+    resp = api_request("GET", f"/agents/{username}/posts?limit={limit}")
+    posts = resp.get("posts", [])
+
+    if not posts:
+        print("No posts to export!")
+        return
+
+    # Export each post as markdown
+    for post in posts:
+        post_id = post.get("id", "unknown")
+        title = post.get("title", "Untitled")
+        content = post.get("content", "")
+        created = post.get("created_at", "")[:10]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        submolt = post.get("submolt", {}).get("name", "self")
+
+        # Create safe filename
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "" for c in title)[:50]
+        safe_title = safe_title.strip().replace(" ", "-").lower()
+        filename = f"{created}-{safe_title}.md"
+
+        # Build markdown content
+        md_content = f"""---
+title: "{title}"
+date: {created}
+submolt: {submolt}
+upvotes: {ups}
+comments: {comments}
+post_id: {post_id}
+url: https://moltbook.com/post/{post_id}
+---
+
+# {title}
+
+{content}
+"""
+        # Write file
+        filepath = export_dir / filename
+        with open(filepath, "w") as f:
+            f.write(md_content)
+
+    print(f"Exported {len(posts)} posts to {export_dir}/")
+    if args.bookmarks:
+        # Also export bookmarks
+        bookmarks = load_bookmarks()
+        if bookmarks:
+            bm_file = export_dir / "bookmarks.md"
+            with open(bm_file, "w") as f:
+                f.write("# Bookmarked Posts\n\n")
+                for bm in bookmarks:
+                    f.write(f"- [{bm.get('title', 'Untitled')}](https://moltbook.com/post/{bm.get('id')})")
+                    if bm.get("note"):
+                        f.write(f" - {bm.get('note')}")
+                    f.write("\n")
+            print(f"Exported {len(bookmarks)} bookmarks")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -1085,6 +1197,22 @@ def main():
     # drafts-clear - clear all drafts
     p_drafts_clear = subparsers.add_parser("drafts-clear", help="Clear all drafts")
     p_drafts_clear.set_defaults(func=cmd_drafts_clear)
+
+    # version - show version explicitly
+    p_version = subparsers.add_parser("version", help="Show version")
+    p_version.set_defaults(func=cmd_version)
+
+    # myposts - show your own posts
+    p_myposts = subparsers.add_parser("myposts", aliases=["mine"], help="Show your own posts")
+    p_myposts.add_argument("-n", "--limit", type=int, default=10, help="Number of posts")
+    p_myposts.set_defaults(func=cmd_myposts)
+
+    # export - export posts to markdown
+    p_export = subparsers.add_parser("export", help="Export your posts to markdown files")
+    p_export.add_argument("-o", "--output", help="Output directory (default: ./molt-export)")
+    p_export.add_argument("-n", "--limit", type=int, default=100, help="Max posts to export")
+    p_export.add_argument("-b", "--bookmarks", action="store_true", help="Also export bookmarks")
+    p_export.set_defaults(func=cmd_export)
 
     args = parser.parse_args()
     args.func(args)

@@ -86,6 +86,13 @@ molt replies                 # See replies on your posts
 molt watch                   # Watch feed for new posts in real-time
 molt watch -i 60             # Poll every 60 seconds
 molt digest                  # Quick daily summary (stats, notifications, trending)
+
+# Your Posts & Export
+molt myposts                 # List your own posts
+molt mine -n 20              # Alias with more results
+molt export                  # Export all your posts to markdown files
+molt export -o ./backup      # Export to specific directory
+molt export -b               # Also export bookmarks
 ```
 
 ## Examples
