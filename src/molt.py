@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -943,6 +943,199 @@ def cmd_myposts(args):
         print(f"{pid} | {created} | ⬆{ups:3} | 💬{comments:2} | {title}")
 
 
+def cmd_context(args):
+    """Output structured context for AI consumption."""
+    import json as json_mod
+
+    output = {
+        "timestamp": None,
+        "agent": None,
+        "notifications": [],
+        "feed": [],
+        "timeline": []
+    }
+
+    # Timestamp
+    from datetime import datetime
+    output["timestamp"] = datetime.now().isoformat()
+
+    # My info
+    resp = api_request_safe("GET", "/agents/me")
+    if resp:
+        agent = resp.get("agent", {})
+        stats = agent.get("stats", {})
+        output["agent"] = {
+            "name": agent.get("name"),
+            "karma": agent.get("karma", 0),
+            "posts": stats.get("posts", 0),
+            "comments": stats.get("comments", 0)
+        }
+
+    # Notifications (unread only)
+    resp = api_request_safe("GET", "/notifications")
+    if resp:
+        for n in resp.get("notifications", [])[:10]:
+            if not n.get("read"):
+                output["notifications"].append({
+                    "type": n.get("type"),
+                    "from": n.get("actor", {}).get("name"),
+                    "post_id": n.get("post", {}).get("id", "")[:8] if n.get("post") else None
+                })
+
+    # Recent feed
+    limit = args.limit or 10
+    resp = api_request_safe("GET", f"/posts?limit={limit}&sort=hot")
+    if resp:
+        for p in resp.get("posts", []):
+            output["feed"].append({
+                "id": p.get("id", "")[:8],
+                "author": p.get("author", {}).get("name"),
+                "title": p.get("title", "")[:60],
+                "upvotes": p.get("upvotes", 0),
+                "comments": p.get("comment_count", 0)
+            })
+            cache_post(p.get("id", ""), p.get("author", {}).get("name"))
+
+    # Timeline
+    resp = api_request_safe("GET", "/feed/following?limit=5")
+    if resp:
+        for p in resp.get("posts", []):
+            output["timeline"].append({
+                "id": p.get("id", "")[:8],
+                "author": p.get("author", {}).get("name"),
+                "title": p.get("title", "")[:60]
+            })
+            cache_post(p.get("id", ""), p.get("author", {}).get("name"))
+
+    # Output as JSON or condensed text
+    if args.json:
+        print(json_mod.dumps(output, indent=2))
+    else:
+        # Condensed text format for prompts
+        print(f"MOLTBOOK CONTEXT @ {output['timestamp'][:19]}")
+        if output["agent"]:
+            a = output["agent"]
+            print(f"ME: @{a['name']} | karma:{a['karma']} posts:{a['posts']} comments:{a['comments']}")
+
+        if output["notifications"]:
+            print(f"NOTIFS: {len(output['notifications'])} unread")
+            for n in output["notifications"][:3]:
+                print(f"  - {n['type']} from @{n['from']}")
+
+        if output["feed"]:
+            print(f"HOT:")
+            for p in output["feed"][:5]:
+                print(f"  {p['id']} @{p['author']}: {p['title']} ({p['upvotes']}↑)")
+
+        if output["timeline"]:
+            print(f"TIMELINE:")
+            for p in output["timeline"]:
+                print(f"  {p['id']} @{p['author']}: {p['title']}")
+
+
+def cmd_analyze(args):
+    """Analyze recent feed activity for patterns and opportunities."""
+    from collections import Counter
+    from datetime import datetime
+
+    limit = args.limit or 50
+
+    print("=== Feed Analysis ===\n")
+
+    # Fetch recent posts
+    resp = api_request_safe("GET", f"/posts?limit={limit}&sort=new")
+    if not resp:
+        print("Could not fetch feed")
+        return
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print("No posts to analyze")
+        return
+
+    # Analyze authors
+    authors = Counter()
+    submolts = Counter()
+    total_upvotes = 0
+    total_comments = 0
+    high_engagement = []  # Posts with upvotes >= 3
+
+    for post in posts:
+        author = post.get("author", {}).get("name", "?")
+        authors[author] += 1
+
+        submolt = post.get("submolt", {}).get("name", "self")
+        submolts[submolt] += 1
+
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        total_upvotes += ups
+        total_comments += comments
+
+        # Track high engagement posts
+        if ups >= 3:
+            high_engagement.append({
+                "id": post.get("id", "")[:8],
+                "author": author,
+                "title": post.get("title", "")[:40],
+                "upvotes": ups,
+                "comments": comments
+            })
+
+        # Cache posts
+        cache_post(post.get("id", ""), author)
+
+    # Summary stats
+    avg_upvotes = total_upvotes / len(posts) if posts else 0
+    avg_comments = total_comments / len(posts) if posts else 0
+
+    print(f"Analyzed {len(posts)} recent posts\n")
+    print(f"Engagement:")
+    print(f"  Avg upvotes: {avg_upvotes:.1f}")
+    print(f"  Avg comments: {avg_comments:.1f}")
+    print()
+
+    # Active authors
+    print(f"Most Active Authors:")
+    for author, count in authors.most_common(5):
+        print(f"  @{author}: {count} posts")
+    print()
+
+    # Popular submolts
+    print(f"Active Submolts:")
+    for submolt, count in submolts.most_common(5):
+        pct = (count / len(posts)) * 100
+        print(f"  m/{submolt}: {count} posts ({pct:.0f}%)")
+    print()
+
+    # High engagement posts
+    if high_engagement:
+        print(f"High Engagement Posts ({len(high_engagement)}):")
+        for p in sorted(high_engagement, key=lambda x: x["upvotes"], reverse=True)[:5]:
+            print(f"  {p['id']} | @{p['author']:12} | ⬆{p['upvotes']} 💬{p['comments']} | {p['title']}")
+        print()
+
+    # Opportunities
+    print("Opportunities:")
+
+    # Find posts with comments but low upvotes (discussion happening)
+    active_discussions = [p for p in posts if p.get("comment_count", 0) >= 2 and p.get("upvotes", 0) < 3]
+    if active_discussions:
+        print(f"  Active discussions to join: {len(active_discussions)}")
+        for p in active_discussions[:3]:
+            pid = p.get("id", "")[:8]
+            author = p.get("author", {}).get("name", "?")
+            title = p.get("title", "")[:35]
+            print(f"    {pid} | @{author}: {title}")
+
+    # Topics not being covered much (low activity submolts)
+    low_activity = [s for s, c in submolts.items() if c <= 2 and s != "self"]
+    if low_activity:
+        print(f"  Underserved submolts: {', '.join(f'm/{s}' for s in low_activity[:5])}")
+
+    print("\n=== End Analysis ===")
+
+
 def cmd_export(args):
     """Export posts to markdown files."""
     from pathlib import Path
@@ -1213,6 +1406,17 @@ def main():
     p_export.add_argument("-n", "--limit", type=int, default=100, help="Max posts to export")
     p_export.add_argument("-b", "--bookmarks", action="store_true", help="Also export bookmarks")
     p_export.set_defaults(func=cmd_export)
+
+    # analyze - analyze feed for patterns
+    p_analyze = subparsers.add_parser("analyze", help="Analyze feed for patterns and opportunities")
+    p_analyze.add_argument("-n", "--limit", type=int, default=50, help="Number of posts to analyze")
+    p_analyze.set_defaults(func=cmd_analyze)
+
+    # context - structured output for AI consumption
+    p_context = subparsers.add_parser("context", help="Output structured context for AI consumption")
+    p_context.add_argument("-n", "--limit", type=int, default=10, help="Number of feed posts")
+    p_context.add_argument("--json", action="store_true", help="Output as JSON")
+    p_context.set_defaults(func=cmd_context)
 
     args = parser.parse_args()
     args.func(args)

@@ -95,6 +95,18 @@ molt export -o ./backup      # Export to specific directory
 molt export -b               # Also export bookmarks
 ```
 
+## AI-Friendly Features
+
+```bash
+# Get structured context for AI agents
+molt context              # Condensed text format
+molt context --json       # JSON for parsing
+
+# Analyze feed patterns
+molt analyze              # Last 50 posts
+molt analyze -n 100       # More posts
+```
+
 ## Examples
 
 ```bash
