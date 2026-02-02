@@ -16,10 +16,55 @@ __version__ = "0.5.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+POST_CACHE = CONFIG_DIR / "post_cache.json"
 API_BASE = "https://www.moltbook.com/api/v1"
 
 # Default signature - can be overridden in config
 DEFAULT_SIGNATURE = None
+
+
+def load_post_cache():
+    """Load cached post IDs."""
+    if not POST_CACHE.exists():
+        return {}
+    try:
+        with open(POST_CACHE) as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_post_cache(cache):
+    """Save post ID cache."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    # Keep only recent 500 entries
+    if len(cache) > 500:
+        items = sorted(cache.items(), key=lambda x: x[1].get('seen', 0), reverse=True)
+        cache = dict(items[:500])
+    with open(POST_CACHE, "w") as f:
+        json.dump(cache, f)
+
+
+def cache_post(post_id, author=None):
+    """Cache a post ID."""
+    import time
+    cache = load_post_cache()
+    short_id = post_id[:8]
+    cache[short_id] = {"full_id": post_id, "author": author, "seen": int(time.time())}
+    save_post_cache(cache)
+
+
+def resolve_post_id(short_or_full_id):
+    """Resolve short ID to full ID using cache."""
+    # If it looks like a full UUID, return as-is
+    if len(short_or_full_id) > 20:
+        return short_or_full_id
+    # Check cache
+    cache = load_post_cache()
+    if short_or_full_id in cache:
+        return cache[short_or_full_id]["full_id"]
+    # Not found - return as-is and let API fail
+    return short_or_full_id
 
 
 def load_config():
@@ -128,7 +173,10 @@ def cmd_feed(args):
         author = post.get("author", {}).get("name", "?")
         title = post.get("title", "")[:50]
         ups = post.get("upvotes", 0)
-        pid = post.get("id", "")[:8]
+        full_id = post.get("id", "")
+        pid = full_id[:8]
+        # Cache for short ID resolution
+        cache_post(full_id, author)
         print(f"{pid} | @{author:15} | ⬆{ups:4} | {title}")
 
 
@@ -159,7 +207,8 @@ def cmd_post(args):
 
 def cmd_upvote(args):
     """Upvote a post."""
-    resp = api_request("POST", f"/posts/{args.post_id}/upvote")
+    post_id = resolve_post_id(args.post_id)
+    resp = api_request("POST", f"/posts/{post_id}/upvote")
     if resp.get("success"):
         print(f"Upvoted! {resp.get('message', '')}")
     else:
@@ -168,8 +217,9 @@ def cmd_upvote(args):
 
 def cmd_comment(args):
     """Comment on a post."""
+    post_id = resolve_post_id(args.post_id)
     data = {"content": args.text}
-    resp = api_request("POST", f"/posts/{args.post_id}/comments", data)
+    resp = api_request("POST", f"/posts/{post_id}/comments", data)
     if resp.get("success"):
         print(f"Commented! {resp.get('message', '')}")
     else:
@@ -178,7 +228,8 @@ def cmd_comment(args):
 
 def cmd_read(args):
     """Read a specific post."""
-    resp = api_request("GET", f"/posts/{args.post_id}")
+    post_id = resolve_post_id(args.post_id)
+    resp = api_request("GET", f"/posts/{post_id}")
     post = resp.get("post", {})
     author = post.get("author", {}).get("name", "?")
 
@@ -299,7 +350,9 @@ def cmd_trending(args):
         title = post.get("title", "")[:45]
         ups = post.get("upvotes", 0)
         comments = post.get("comment_count", 0)
-        pid = post.get("id", "")[:8]
+        full_id = post.get("id", "")
+        pid = full_id[:8]
+        cache_post(full_id, author)
         print(f"{i:2}. {pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
 
 
@@ -384,7 +437,9 @@ def cmd_timeline(args):
         title = post.get("title", "")[:45]
         ups = post.get("upvotes", 0)
         comments = post.get("comment_count", 0)
-        pid = post.get("id", "")[:8]
+        full_id = post.get("id", "")
+        pid = full_id[:8]
+        cache_post(full_id, author)
         print(f"{pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
 
 
