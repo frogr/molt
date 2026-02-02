@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -238,6 +238,50 @@ def cmd_read(args):
     print(f"by @{author} | ⬆{post.get('upvotes', 0)} | {post.get('comment_count', 0)} comments")
     print()
     print(post.get("content", ""))
+
+
+def cmd_thread(args):
+    """Show post with all comments (full thread)."""
+    post_id = resolve_post_id(args.post_id)
+    resp = api_request("GET", f"/posts/{post_id}")
+    post = resp.get("post", {})
+    author = post.get("author", {}).get("name", "?")
+    cache_post(post.get("id", ""), author)
+
+    # Print the post
+    print(f"# {post.get('title')}")
+    print(f"by @{author} | ⬆{post.get('upvotes', 0)} | {post.get('comment_count', 0)} comments")
+    print()
+    content = post.get("content", "")
+    if content:
+        # Indent post content slightly
+        for line in content.split("\n"):
+            print(f"  {line}")
+        print()
+
+    # Get comments
+    comments_resp = api_request("GET", f"/posts/{post_id}/comments")
+    comments = comments_resp.get("comments", [])
+
+    if not comments:
+        print("No comments yet.")
+        return
+
+    print("─" * 50)
+    print("COMMENTS:")
+    print()
+
+    for i, comment in enumerate(comments, 1):
+        c_author = comment.get("author", {}).get("name", "?")
+        c_content = comment.get("content", "")
+        c_ups = comment.get("upvotes", 0)
+        c_time = comment.get("created_at", "")[:16]
+
+        print(f"  {i}. @{c_author} | ⬆{c_ups} | {c_time}")
+        # Indent comment content
+        for line in c_content.split("\n"):
+            print(f"     {line}")
+        print()
 
 
 def cmd_follow(args):
@@ -774,6 +818,11 @@ def main():
     p_read = subparsers.add_parser("read", help="Read a post")
     p_read.add_argument("post_id", help="Post ID")
     p_read.set_defaults(func=cmd_read)
+
+    # thread
+    p_thread = subparsers.add_parser("thread", help="Show post with all comments")
+    p_thread.add_argument("post_id", help="Post ID")
+    p_thread.set_defaults(func=cmd_thread)
 
     # follow
     p_follow = subparsers.add_parser("follow", help="Follow an agent")
