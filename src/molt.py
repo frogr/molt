@@ -18,6 +18,7 @@ CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 POST_CACHE = CONFIG_DIR / "post_cache.json"
 BOOKMARKS_FILE = CONFIG_DIR / "bookmarks.json"
+DRAFTS_FILE = CONFIG_DIR / "drafts.json"
 API_BASE = "https://www.moltbook.com/api/v1"
 
 # Default signature - can be overridden in config
@@ -259,16 +260,22 @@ def cmd_thread(args):
             print(f"  {line}")
         print()
 
-    # Get comments
-    comments_resp = api_request("GET", f"/posts/{post_id}/comments")
+    # Get comments (use safe request for graceful degradation)
+    comments_resp = api_request_safe("GET", f"/posts/{post_id}/comments")
+    if not comments_resp:
+        print("─" * 50)
+        print("Could not load comments")
+        return
+
     comments = comments_resp.get("comments", [])
 
     if not comments:
+        print("─" * 50)
         print("No comments yet.")
         return
 
     print("─" * 50)
-    print("COMMENTS:")
+    print(f"COMMENTS ({len(comments)}):")
     print()
 
     for i, comment in enumerate(comments, 1):
@@ -635,6 +642,140 @@ def cmd_bookmarks_clear(args):
     print(f"Cleared {count} bookmarks")
 
 
+def load_drafts():
+    """Load drafts from disk."""
+    if not DRAFTS_FILE.exists():
+        return []
+    try:
+        with open(DRAFTS_FILE) as f:
+            return json.load(f)
+    except:
+        return []
+
+
+def save_drafts(drafts):
+    """Save drafts to disk."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    with open(DRAFTS_FILE, "w") as f:
+        json.dump(drafts, f, indent=2)
+
+
+def cmd_draft_create(args):
+    """Create a new draft post."""
+    import time
+    import uuid
+
+    drafts = load_drafts()
+    draft_id = str(uuid.uuid4())[:8]
+
+    drafts.append({
+        "id": draft_id,
+        "title": args.title,
+        "content": args.content,
+        "submolt": args.submolt or "self",
+        "created_at": int(time.time()),
+        "updated_at": int(time.time())
+    })
+    save_drafts(drafts)
+    print(f"Draft saved: {draft_id}")
+    print(f"  Title: {args.title}")
+    print(f"  Submolt: {args.submolt or 'self'}")
+
+
+def cmd_drafts_list(args):
+    """List all drafts."""
+    from datetime import datetime
+    drafts = load_drafts()
+
+    if not drafts:
+        print("No drafts. Create one with 'molt draft \"Title\" \"Content\"'")
+        return
+
+    print(f"Drafts ({len(drafts)}):\n")
+    for d in drafts:
+        did = d.get("id", "?")
+        title = d.get("title", "")[:45]
+        submolt = d.get("submolt", "self")
+        updated = datetime.fromtimestamp(d.get("updated_at", 0)).strftime("%Y-%m-%d")
+        print(f"  {did} | m/{submolt:10} | {updated} | {title}")
+
+
+def cmd_draft_show(args):
+    """Show a draft's content."""
+    drafts = load_drafts()
+    draft = next((d for d in drafts if d.get("id") == args.draft_id), None)
+
+    if not draft:
+        print(f"Draft not found: {args.draft_id}")
+        return
+
+    print(f"# {draft.get('title')}")
+    print(f"Submolt: m/{draft.get('submolt', 'self')}")
+    print()
+    print(draft.get("content", ""))
+
+
+def cmd_draft_publish(args):
+    """Publish a draft as a post."""
+    drafts = load_drafts()
+    draft = next((d for d in drafts if d.get("id") == args.draft_id), None)
+
+    if not draft:
+        print(f"Draft not found: {args.draft_id}")
+        return
+
+    content = draft.get("content", "")
+
+    # Add signature if configured
+    if not args.no_sig:
+        sig = get_signature()
+        if sig:
+            content = f"{content}\n\n---\n{sig}"
+
+    data = {
+        "title": draft.get("title"),
+        "content": content,
+        "submolt": draft.get("submolt", "self")
+    }
+    resp = api_request("POST", "/posts", data)
+
+    if resp.get("success"):
+        post = resp.get("post", {})
+        print(f"Published! ID: {post.get('id')}")
+        print(f"URL: https://moltbook.com/post/{post.get('id')}")
+
+        # Remove draft after publishing
+        drafts = [d for d in drafts if d.get("id") != args.draft_id]
+        save_drafts(drafts)
+        print(f"Draft {args.draft_id} removed")
+    else:
+        print(f"Failed: {resp.get('error')}")
+
+
+def cmd_draft_delete(args):
+    """Delete a draft."""
+    drafts = load_drafts()
+    original_len = len(drafts)
+    drafts = [d for d in drafts if d.get("id") != args.draft_id]
+
+    if len(drafts) < original_len:
+        save_drafts(drafts)
+        print(f"Deleted draft: {args.draft_id}")
+    else:
+        print(f"Draft not found: {args.draft_id}")
+
+
+def cmd_drafts_clear(args):
+    """Clear all drafts."""
+    drafts = load_drafts()
+    count = len(drafts)
+    if count == 0:
+        print("No drafts to clear")
+        return
+    save_drafts([])
+    print(f"Cleared {count} drafts")
+
+
 def api_request_safe(method, endpoint, data=None):
     """Make API request that returns None on error instead of exiting."""
     url = f"{API_BASE}{endpoint}"
@@ -913,6 +1054,37 @@ def main():
     # bookmarks-clear
     p_bms_clear = subparsers.add_parser("bookmarks-clear", help="Clear all bookmarks")
     p_bms_clear.set_defaults(func=cmd_bookmarks_clear)
+
+    # draft - create a new draft
+    p_draft = subparsers.add_parser("draft", help="Create a draft post")
+    p_draft.add_argument("title", help="Post title")
+    p_draft.add_argument("content", help="Post content (markdown)")
+    p_draft.add_argument("--submolt", "-m", default="self", help="Submolt (default: self)")
+    p_draft.set_defaults(func=cmd_draft_create)
+
+    # drafts - list all drafts
+    p_drafts = subparsers.add_parser("drafts", help="List draft posts")
+    p_drafts.set_defaults(func=cmd_drafts_list)
+
+    # draft-show - view a draft
+    p_draft_show = subparsers.add_parser("draft-show", help="Show a draft's content")
+    p_draft_show.add_argument("draft_id", help="Draft ID")
+    p_draft_show.set_defaults(func=cmd_draft_show)
+
+    # draft-publish - post a draft
+    p_draft_pub = subparsers.add_parser("draft-publish", aliases=["publish"], help="Publish a draft as a post")
+    p_draft_pub.add_argument("draft_id", help="Draft ID to publish")
+    p_draft_pub.add_argument("--no-sig", action="store_true", help="Don't append signature")
+    p_draft_pub.set_defaults(func=cmd_draft_publish)
+
+    # draft-delete - delete a draft
+    p_draft_del = subparsers.add_parser("draft-delete", help="Delete a draft")
+    p_draft_del.add_argument("draft_id", help="Draft ID to delete")
+    p_draft_del.set_defaults(func=cmd_draft_delete)
+
+    # drafts-clear - clear all drafts
+    p_drafts_clear = subparsers.add_parser("drafts-clear", help="Clear all drafts")
+    p_drafts_clear.set_defaults(func=cmd_drafts_clear)
 
     args = parser.parse_args()
     args.func(args)
