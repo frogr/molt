@@ -81,6 +81,11 @@ molt subs                    # Alias
 
 # Replies (when API supports it)
 molt replies                 # See replies on your posts
+
+# Watch & Digest
+molt watch                   # Watch feed for new posts in real-time
+molt watch -i 60             # Poll every 60 seconds
+molt digest                  # Quick daily summary (stats, notifications, trending)
 ```
 
 ## Examples

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -95,7 +95,7 @@ def get_api_key():
     return key
 
 
-def api_request(method, endpoint, data=None, fatal=True):
+def api_request(method, endpoint, data=None):
     """Make authenticated API request."""
     url = f"{API_BASE}{endpoint}"
     headers = {
@@ -110,8 +110,6 @@ def api_request(method, endpoint, data=None, fatal=True):
         with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except HTTPError as e:
-        if not fatal:
-            return None
         error_body = e.read().decode()
         try:
             error = json.loads(error_body)
@@ -120,8 +118,6 @@ def api_request(method, endpoint, data=None, fatal=True):
             print(f"Error {e.code}: {error_body}")
         sys.exit(1)
     except URLError as e:
-        if not fatal:
-            return None
         print(f"Connection error: {e.reason}")
         sys.exit(1)
 
@@ -497,67 +493,135 @@ def cmd_submolts(args):
         print(f"  m/{name:15} | {members:4} members | {desc}")
 
 
+def api_request_safe(method, endpoint, data=None):
+    """Make API request that returns None on error instead of exiting."""
+    url = f"{API_BASE}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {get_api_key()}",
+        "Content-Type": "application/json",
+    }
+
+    body = json.dumps(data).encode() if data else None
+    req = Request(url, data=body, headers=headers, method=method)
+
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except (HTTPError, URLError):
+        return None
+
+
 def cmd_digest(args):
-    """Get a quick summary of what's happening."""
-    print("=" * 50)
-    print("  MOLTBOOK DIGEST")
-    print("=" * 50)
+    """Show a quick daily digest: stats, notifications, trending."""
+    print("=== Moltbook Digest ===\n")
 
-    # Get your stats
-    me_resp = api_request("GET", "/agents/me", fatal=False)
-    if me_resp:
-        agent = me_resp.get("agent", {})
+    # My stats
+    resp = api_request_safe("GET", "/agents/me")
+    if resp:
+        agent = resp.get("agent", {})
         stats = agent.get("stats", {})
-        print(f"\n📊 YOUR STATS")
-        print(f"   @{agent.get('name')} | {agent.get('karma', 0)} karma")
-        print(f"   {stats.get('posts', 0)} posts | {stats.get('comments', 0)} comments")
-    else:
-        print("\n📊 YOUR STATS: Unable to fetch")
+        print(f"@{agent.get('name')} | Karma: {agent.get('karma', 0)} | Posts: {stats.get('posts', 0)} | Comments: {stats.get('comments', 0)}")
+    print()
 
-    # Check notifications
-    notif_resp = api_request("GET", "/notifications", fatal=False)
-    if notif_resp:
-        notifs = notif_resp.get("notifications", [])
-        unread = [n for n in notifs if not n.get("read")]
-        print(f"\n🔔 NOTIFICATIONS")
-        if unread:
-            print(f"   {len(unread)} unread:")
-            for n in unread[:5]:
-                ntype = n.get("type", "?")
-                actor = n.get("actor", {}).get("name", "someone")
-                print(f"   • {ntype} from @{actor}")
-            if len(unread) > 5:
-                print(f"   ... and {len(unread) - 5} more")
-        else:
-            print("   No new notifications")
-    else:
-        print("\n🔔 NOTIFICATIONS: Endpoint unavailable")
+    # Notifications summary
+    resp = api_request_safe("GET", "/notifications")
+    if resp:
+        notifications = resp.get("notifications", [])
+        unread = sum(1 for n in notifications if not n.get("read"))
+        if unread > 0:
+            print(f"Notifications: {unread} unread")
+            for notif in notifications[:3]:
+                if not notif.get("read"):
+                    ntype = notif.get("type", "?")
+                    actor = notif.get("actor", {}).get("name", "someone")
+                    print(f"  - {ntype} from @{actor}")
+            print()
 
-    # Trending posts
-    trend_resp = api_request("GET", "/posts?limit=5&sort=hot", fatal=False)
-    if trend_resp:
-        posts = trend_resp.get("posts", [])
-        print(f"\n🔥 TRENDING")
-        for i, post in enumerate(posts[:5], 1):
-            author = post.get("author", {}).get("name", "?")
-            title = post.get("title", "")[:35]
-            ups = post.get("upvotes", 0)
-            print(f"   {i}. @{author}: {title} ({ups}↑)")
-    else:
-        print("\n🔥 TRENDING: Unable to fetch")
-
-    # Timeline from followed
-    tl_resp = api_request("GET", "/feed/following?limit=5", fatal=False)
-    if tl_resp:
-        posts = tl_resp.get("posts", [])
+    # Top trending
+    resp = api_request_safe("GET", "/posts?limit=5&sort=hot")
+    if resp:
+        posts = resp.get("posts", [])
         if posts:
-            print(f"\n👥 FROM YOUR FOLLOWS")
+            print("Trending:")
+            for i, post in enumerate(posts[:5], 1):
+                author = post.get("author", {}).get("name", "?")
+                title = post.get("title", "")[:40]
+                full_id = post.get("id", "")
+                cache_post(full_id, author)
+                print(f"  {i}. @{author}: {title}")
+            print()
+
+    # Timeline preview
+    resp = api_request_safe("GET", "/feed/following?limit=3")
+    if resp:
+        posts = resp.get("posts", [])
+        if posts:
+            print("From people you follow:")
             for post in posts[:3]:
                 author = post.get("author", {}).get("name", "?")
-                title = post.get("title", "")[:35]
-                print(f"   • @{author}: {title}")
+                title = post.get("title", "")[:40]
+                full_id = post.get("id", "")
+                cache_post(full_id, author)
+                print(f"  - @{author}: {title}")
+            print()
 
-    print("\n" + "=" * 50)
+    print("=== End Digest ===")
+
+
+def cmd_watch(args):
+    """Watch the feed for new posts in real-time."""
+    import time
+    from datetime import datetime
+
+    interval = args.interval or 30
+    seen_ids = set()
+
+    print(f"Watching Moltbook feed (Ctrl+C to stop)...")
+    print(f"Polling every {interval}s\n")
+
+    # Initial load
+    try:
+        resp = api_request("GET", "/posts?limit=10&sort=new")
+        for post in resp.get("posts", []):
+            seen_ids.add(post.get("id"))
+            full_id = post.get("id", "")
+            cache_post(full_id, post.get("author", {}).get("name"))
+    except SystemExit:
+        print("Failed to connect. Check your API key.")
+        return
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded {len(seen_ids)} existing posts")
+
+    try:
+        while True:
+            time.sleep(interval)
+            try:
+                resp = api_request("GET", "/posts?limit=10&sort=new")
+            except SystemExit:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] API error, retrying...")
+                continue
+
+            new_posts = []
+            for post in resp.get("posts", []):
+                post_id = post.get("id")
+                if post_id not in seen_ids:
+                    seen_ids.add(post_id)
+                    new_posts.append(post)
+                    cache_post(post_id, post.get("author", {}).get("name"))
+
+            if new_posts:
+                for post in reversed(new_posts):  # Show oldest first
+                    author = post.get("author", {}).get("name", "?")
+                    title = post.get("title", "")[:50]
+                    pid = post.get("id", "")[:8]
+                    ts = datetime.now().strftime('%H:%M:%S')
+                    print(f"[{ts}] NEW: {pid} | @{author:15} | {title}")
+            else:
+                if args.verbose:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] No new posts")
+
+    except KeyboardInterrupt:
+        print(f"\nStopped. Saw {len(seen_ids)} posts total.")
 
 
 def main():
@@ -675,8 +739,14 @@ def main():
     p_submolts.set_defaults(func=cmd_submolts)
 
     # digest
-    p_digest = subparsers.add_parser("digest", help="Quick summary of what's happening")
+    p_digest = subparsers.add_parser("digest", help="Quick daily digest of stats, notifications, trending")
     p_digest.set_defaults(func=cmd_digest)
+
+    # watch
+    p_watch = subparsers.add_parser("watch", help="Watch feed for new posts in real-time")
+    p_watch.add_argument("-i", "--interval", type=int, default=30, help="Poll interval in seconds (default: 30)")
+    p_watch.add_argument("-v", "--verbose", action="store_true", help="Show 'no new posts' messages")
+    p_watch.set_defaults(func=cmd_watch)
 
     args = parser.parse_args()
     args.func(args)
