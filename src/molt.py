@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -1981,6 +1981,94 @@ url: https://moltbook.com/post/{post_id}
             print(f"Exported {len(bookmarks)} bookmarks")
 
 
+def cmd_rss(args):
+    """Generate RSS feed from your posts or any agent's posts."""
+    from datetime import datetime
+    import html
+
+    # Get target username
+    if args.username:
+        username = args.username.lstrip("@")
+    else:
+        resp = api_request("GET", "/agents/me")
+        agent = resp.get("agent", {})
+        username = agent.get("name")
+        if not username:
+            print("Could not determine your username")
+            return
+
+    # Get posts - try direct endpoint first, fallback to feed scan
+    limit = args.limit or 20
+    resp = api_request_safe("GET", f"/agents/{username}/posts?limit={limit}")
+
+    if resp and resp.get("posts"):
+        posts = resp.get("posts", [])
+    else:
+        # Fallback: scan feed for this user's posts
+        resp = api_request_safe("GET", f"/posts?limit=200&sort=new")
+        if not resp:
+            print("Could not fetch posts")
+            return
+        posts = [p for p in resp.get("posts", []) if p.get("author", {}).get("name") == username][:limit]
+
+    if not posts:
+        print(f"No posts found for @{username}")
+        return
+
+    # Build RSS XML
+    now = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+    rss = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel>
+  <title>@{html.escape(username)} on Moltbook</title>
+  <link>https://moltbook.com/u/{html.escape(username)}</link>
+  <description>Posts by @{html.escape(username)} on Moltbook</description>
+  <language>en</language>
+  <lastBuildDate>{now}</lastBuildDate>
+  <generator>molt CLI (https://github.com/frogr/molt)</generator>
+  <atom:link href="https://moltbook.com/u/{html.escape(username)}/rss" rel="self" type="application/rss+xml"/>
+'''
+
+    for post in posts:
+        post_id = post.get("id", "")
+        title = html.escape(post.get("title", "Untitled"))
+        content = html.escape(post.get("content", ""))
+        created = post.get("created_at", "")
+
+        # Parse ISO date to RSS format
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+        except:
+            pub_date = now
+
+        post_url = f"https://moltbook.com/post/{post_id}"
+
+        rss += f'''  <item>
+    <title>{title}</title>
+    <link>{post_url}</link>
+    <guid isPermaLink="true">{post_url}</guid>
+    <pubDate>{pub_date}</pubDate>
+    <description><![CDATA[{content}]]></description>
+  </item>
+'''
+
+    rss += '''</channel>
+</rss>
+'''
+
+    # Output to file or stdout
+    if args.output:
+        output_path = Path(args.output)
+        with open(output_path, "w") as f:
+            f.write(rss)
+        print(f"RSS feed written to {output_path}")
+        print(f"Contains {len(posts)} posts from @{username}")
+    else:
+        print(rss)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -2267,6 +2355,13 @@ def main():
     p_export.add_argument("-n", "--limit", type=int, default=100, help="Max posts to export")
     p_export.add_argument("-b", "--bookmarks", action="store_true", help="Also export bookmarks")
     p_export.set_defaults(func=cmd_export)
+
+    # rss - generate RSS feed from posts
+    p_rss = subparsers.add_parser("rss", help="Generate RSS feed from your posts (or any agent's)")
+    p_rss.add_argument("username", nargs="?", help="Agent username (default: yourself)")
+    p_rss.add_argument("-o", "--output", help="Output file (default: stdout)")
+    p_rss.add_argument("-n", "--limit", type=int, default=20, help="Max posts to include")
+    p_rss.set_defaults(func=cmd_rss)
 
     # agents - leaderboard / top agents
     p_agents = subparsers.add_parser("agents", aliases=["leaderboard", "lb"], help="Show top agents / leaderboard")
