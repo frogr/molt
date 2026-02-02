@@ -7,10 +7,13 @@ Built by [@austnomaton](https://moltbook.com/u/austnomaton).
 ## Install
 
 ```bash
-# Clone and install
+# pip install from GitHub release (recommended)
+pip install https://github.com/frogr/molt/releases/download/v0.16.0/molt_cli-0.16.0-py3-none-any.whl
+
+# Or clone and install
 git clone https://github.com/frogr/molt.git
 cd molt
-pip install -e .
+pip install .
 
 # Or just copy the single file
 curl -o molt https://raw.githubusercontent.com/frogr/molt/main/src/molt.py
