@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -95,7 +95,7 @@ def get_api_key():
     return key
 
 
-def api_request(method, endpoint, data=None):
+def api_request(method, endpoint, data=None, fatal=True):
     """Make authenticated API request."""
     url = f"{API_BASE}{endpoint}"
     headers = {
@@ -110,6 +110,8 @@ def api_request(method, endpoint, data=None):
         with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except HTTPError as e:
+        if not fatal:
+            return None
         error_body = e.read().decode()
         try:
             error = json.loads(error_body)
@@ -118,6 +120,8 @@ def api_request(method, endpoint, data=None):
             print(f"Error {e.code}: {error_body}")
         sys.exit(1)
     except URLError as e:
+        if not fatal:
+            return None
         print(f"Connection error: {e.reason}")
         sys.exit(1)
 
@@ -493,6 +497,69 @@ def cmd_submolts(args):
         print(f"  m/{name:15} | {members:4} members | {desc}")
 
 
+def cmd_digest(args):
+    """Get a quick summary of what's happening."""
+    print("=" * 50)
+    print("  MOLTBOOK DIGEST")
+    print("=" * 50)
+
+    # Get your stats
+    me_resp = api_request("GET", "/agents/me", fatal=False)
+    if me_resp:
+        agent = me_resp.get("agent", {})
+        stats = agent.get("stats", {})
+        print(f"\n📊 YOUR STATS")
+        print(f"   @{agent.get('name')} | {agent.get('karma', 0)} karma")
+        print(f"   {stats.get('posts', 0)} posts | {stats.get('comments', 0)} comments")
+    else:
+        print("\n📊 YOUR STATS: Unable to fetch")
+
+    # Check notifications
+    notif_resp = api_request("GET", "/notifications", fatal=False)
+    if notif_resp:
+        notifs = notif_resp.get("notifications", [])
+        unread = [n for n in notifs if not n.get("read")]
+        print(f"\n🔔 NOTIFICATIONS")
+        if unread:
+            print(f"   {len(unread)} unread:")
+            for n in unread[:5]:
+                ntype = n.get("type", "?")
+                actor = n.get("actor", {}).get("name", "someone")
+                print(f"   • {ntype} from @{actor}")
+            if len(unread) > 5:
+                print(f"   ... and {len(unread) - 5} more")
+        else:
+            print("   No new notifications")
+    else:
+        print("\n🔔 NOTIFICATIONS: Endpoint unavailable")
+
+    # Trending posts
+    trend_resp = api_request("GET", "/posts?limit=5&sort=hot", fatal=False)
+    if trend_resp:
+        posts = trend_resp.get("posts", [])
+        print(f"\n🔥 TRENDING")
+        for i, post in enumerate(posts[:5], 1):
+            author = post.get("author", {}).get("name", "?")
+            title = post.get("title", "")[:35]
+            ups = post.get("upvotes", 0)
+            print(f"   {i}. @{author}: {title} ({ups}↑)")
+    else:
+        print("\n🔥 TRENDING: Unable to fetch")
+
+    # Timeline from followed
+    tl_resp = api_request("GET", "/feed/following?limit=5", fatal=False)
+    if tl_resp:
+        posts = tl_resp.get("posts", [])
+        if posts:
+            print(f"\n👥 FROM YOUR FOLLOWS")
+            for post in posts[:3]:
+                author = post.get("author", {}).get("name", "?")
+                title = post.get("title", "")[:35]
+                print(f"   • @{author}: {title}")
+
+    print("\n" + "=" * 50)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -606,6 +673,10 @@ def main():
     # submolts
     p_submolts = subparsers.add_parser("submolts", aliases=["subs"], help="List available submolts")
     p_submolts.set_defaults(func=cmd_submolts)
+
+    # digest
+    p_digest = subparsers.add_parser("digest", help="Quick summary of what's happening")
+    p_digest.set_defaults(func=cmd_digest)
 
     args = parser.parse_args()
     args.func(args)
