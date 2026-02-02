@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -546,17 +546,80 @@ def cmd_replies(args):
     limit = args.limit or 10
     print(f"Recent replies ({len(comments)} total):\n")
 
-    for notif in comments[:limit]:
+    for i, notif in enumerate(comments[:limit], 1):
         actor = notif.get("actor", {}).get("name", "?")
-        post_title = notif.get("post", {}).get("title", "your post")[:30]
+        post = notif.get("post", {})
+        post_title = post.get("title", "your post")[:30]
+        post_id = post.get("id", "")[:8]
         content = notif.get("content", "")[:50].replace("\n", " ")
         created = notif.get("created_at", "")[:10]
         read = "  " if notif.get("read") else "• "
 
-        print(f"{read}{created} | @{actor} replied to \"{post_title}\"")
+        print(f"{read}[{i}] {created} | @{actor} replied to \"{post_title}\" ({post_id})")
         if content:
-            print(f"    └─ {content}...")
+            print(f"       └─ {content}...")
         print()
+
+
+def cmd_reply(args):
+    """Reply to a recent comment on your post OR directly to a post."""
+    # If a post_id is provided directly, use that
+    if args.post_id:
+        post_id = resolve_post_id(args.post_id)
+        data = {"content": args.text}
+        resp = api_request("POST", f"/posts/{post_id}/comments", data)
+        if resp.get("success"):
+            print(f"Replied to post {args.post_id[:8]}!")
+        else:
+            print(f"Failed: {resp.get('error')}")
+        return
+
+    # Otherwise, try to use notifications (may not be available)
+    resp = api_request_safe("GET", "/notifications")
+    if not resp:
+        print("Notifications endpoint not available.")
+        print("Use 'molt reply \"text\" -p <post_id>' to reply directly to a post.")
+        return
+
+    notifications = resp.get("notifications", [])
+    comments = [n for n in notifications if n.get("type") == "comment"]
+
+    if not comments:
+        print("No replies to respond to.")
+        print("Use 'molt reply \"text\" -p <post_id>' to reply directly to a post.")
+        return
+
+    # Determine which reply to respond to
+    index = args.index - 1 if args.index else 0  # Default to most recent (index 1)
+
+    if index < 0 or index >= len(comments):
+        print(f"Invalid reply index. You have {len(comments)} replies.")
+        print("Use 'molt replies' to see them.")
+        return
+
+    target = comments[index]
+    actor = target.get("actor", {}).get("name", "?")
+    post = target.get("post", {})
+    post_id = post.get("id", "")
+    post_title = post.get("title", "")[:40]
+    original_content = target.get("content", "")[:100]
+
+    if not post_id:
+        print("Could not find post ID for this reply")
+        return
+
+    # Show context
+    print(f"Replying to @{actor}'s comment on \"{post_title}\":")
+    print(f"  \"{original_content}{'...' if len(target.get('content', '')) > 100 else ''}\"")
+    print()
+
+    # Post the reply as a comment on the same post
+    data = {"content": args.text}
+    resp = api_request("POST", f"/posts/{post_id}/comments", data)
+    if resp.get("success"):
+        print(f"Replied! Your response has been posted.")
+    else:
+        print(f"Failed: {resp.get('error')}")
 
 
 def cmd_submolts(args):
@@ -1717,6 +1780,13 @@ def main():
     p_replies = subparsers.add_parser("replies", help="Show replies on your posts")
     p_replies.add_argument("-n", "--limit", type=int, default=10, help="Number of replies to show")
     p_replies.set_defaults(func=cmd_replies)
+
+    # reply - respond to a comment on your post or directly to a post
+    p_reply = subparsers.add_parser("reply", help="Reply to a comment or directly to a post")
+    p_reply.add_argument("text", help="Your reply text")
+    p_reply.add_argument("-i", "--index", type=int, default=1, help="Which reply to respond to (1=most recent, from 'molt replies')")
+    p_reply.add_argument("-p", "--post-id", help="Reply directly to this post ID instead of using notifications")
+    p_reply.set_defaults(func=cmd_reply)
 
     # submolts
     p_submolts = subparsers.add_parser("submolts", aliases=["subs"], help="List available submolts")
