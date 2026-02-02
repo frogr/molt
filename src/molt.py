@@ -12,11 +12,14 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 API_BASE = "https://www.moltbook.com/api/v1"
+
+# Default signature - can be overridden in config
+DEFAULT_SIGNATURE = None
 
 
 def load_config():
@@ -24,6 +27,12 @@ def load_config():
         return {}
     with open(CONFIG_FILE) as f:
         return json.load(f)
+
+
+def get_signature():
+    """Get signature from config or default."""
+    config = load_config()
+    return config.get("signature", DEFAULT_SIGNATURE)
 
 
 def save_config(config):
@@ -76,6 +85,26 @@ def cmd_auth(args):
     print(f"API key saved to {CONFIG_FILE}")
 
 
+def cmd_config(args):
+    """Set config options."""
+    config = load_config()
+
+    if args.signature is not None:
+        if args.signature == "":
+            config.pop("signature", None)
+            print("Signature cleared")
+        else:
+            config["signature"] = args.signature
+            print(f"Signature set to: {args.signature}")
+        save_config(config)
+        return
+
+    # Show current config
+    print(f"Config file: {CONFIG_FILE}")
+    print(f"API key: {'***' + config.get('api_key', '')[-4:] if config.get('api_key') else 'not set'}")
+    print(f"Signature: {config.get('signature', 'not set')}")
+
+
 def cmd_me(args):
     """Show my stats."""
     resp = api_request("GET", "/agents/me")
@@ -105,9 +134,17 @@ def cmd_feed(args):
 
 def cmd_post(args):
     """Create a post."""
+    content = args.content
+
+    # Add signature if configured and not disabled
+    if not args.no_sig:
+        sig = get_signature()
+        if sig:
+            content = f"{content}\n\n---\n{sig}"
+
     data = {
         "title": args.title,
-        "content": args.content,
+        "content": content,
         "submolt": args.submolt or "self"
     }
     resp = api_request("POST", "/posts", data)
@@ -115,7 +152,7 @@ def cmd_post(args):
     if resp.get("success"):
         post = resp.get("post", {})
         print(f"Posted! ID: {post.get('id')}")
-        print(f"URL: https://moltbook.com{post.get('url', '')}")
+        print(f"URL: https://moltbook.com/post/{post.get('id')}")
     else:
         print(f"Failed: {resp.get('error')}")
 
@@ -365,6 +402,11 @@ def main():
     p_auth.add_argument("key", help="Your Moltbook API key")
     p_auth.set_defaults(func=cmd_auth)
 
+    # config
+    p_config = subparsers.add_parser("config", help="View/set config")
+    p_config.add_argument("--signature", "-s", nargs="?", const="", help="Set post signature (empty to clear)")
+    p_config.set_defaults(func=cmd_config)
+
     # me
     p_me = subparsers.add_parser("me", help="Show my stats")
     p_me.set_defaults(func=cmd_me)
@@ -380,6 +422,7 @@ def main():
     p_post.add_argument("title", help="Post title")
     p_post.add_argument("content", help="Post content (markdown)")
     p_post.add_argument("--submolt", "-m", default="self", help="Submolt (default: self)")
+    p_post.add_argument("--no-sig", action="store_true", help="Don't append signature")
     p_post.set_defaults(func=cmd_post)
 
     # upvote
