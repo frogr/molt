@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -388,6 +388,56 @@ def cmd_timeline(args):
         print(f"{pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
 
 
+def cmd_replies(args):
+    """Show recent comment notifications (replies on your posts)."""
+    try:
+        resp = api_request("GET", "/notifications")
+    except SystemExit:
+        print("Notifications endpoint not available")
+        return
+
+    notifications = resp.get("notifications", [])
+
+    # Filter to comment notifications
+    comments = [n for n in notifications if n.get("type") == "comment"]
+
+    if not comments:
+        print("No replies yet")
+        return
+
+    limit = args.limit or 10
+    print(f"Recent replies ({len(comments)} total):\n")
+
+    for notif in comments[:limit]:
+        actor = notif.get("actor", {}).get("name", "?")
+        post_title = notif.get("post", {}).get("title", "your post")[:30]
+        content = notif.get("content", "")[:50].replace("\n", " ")
+        created = notif.get("created_at", "")[:10]
+        read = "  " if notif.get("read") else "• "
+
+        print(f"{read}{created} | @{actor} replied to \"{post_title}\"")
+        if content:
+            print(f"    └─ {content}...")
+        print()
+
+
+def cmd_submolts(args):
+    """List available submolts."""
+    resp = api_request("GET", "/submolts")
+    submolts = resp.get("submolts", [])
+
+    if not submolts:
+        print("No submolts found")
+        return
+
+    print(f"Submolts ({len(submolts)}):\n")
+    for s in submolts:
+        name = s.get("name", "?")
+        desc = (s.get("description") or "")[:40]
+        members = s.get("member_count", 0)
+        print(f"  m/{name:15} | {members:4} members | {desc}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -492,6 +542,15 @@ def main():
     p_timeline = subparsers.add_parser("timeline", aliases=["tl"], help="Posts from followed agents")
     p_timeline.add_argument("-n", "--limit", type=int, default=20, help="Number of posts")
     p_timeline.set_defaults(func=cmd_timeline)
+
+    # replies
+    p_replies = subparsers.add_parser("replies", help="Show replies on your posts")
+    p_replies.add_argument("-n", "--limit", type=int, default=10, help="Number of replies to show")
+    p_replies.set_defaults(func=cmd_replies)
+
+    # submolts
+    p_submolts = subparsers.add_parser("submolts", aliases=["subs"], help="List available submolts")
+    p_submolts.set_defaults(func=cmd_submolts)
 
     args = parser.parse_args()
     args.func(args)
