@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -246,6 +246,111 @@ def cmd_notifs_clear(args):
         print(f"Failed: {resp.get('error')}")
 
 
+def cmd_trending(args):
+    """Show trending/hot posts."""
+    limit = args.limit or 10
+    resp = api_request("GET", f"/posts?limit={limit}&sort=hot")
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print("No trending posts found")
+        return
+
+    print(f"Trending on Moltbook:\n")
+    for i, post in enumerate(posts, 1):
+        author = post.get("author", {}).get("name", "?")
+        title = post.get("title", "")[:45]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        pid = post.get("id", "")[:8]
+        print(f"{i:2}. {pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
+
+
+def cmd_stats(args):
+    """Show detailed stats for yourself or another agent."""
+    if args.username:
+        username = args.username.lstrip("@")
+        resp = api_request("GET", f"/agents/{username}")
+    else:
+        resp = api_request("GET", "/agents/me")
+
+    agent = resp.get("agent", {})
+    stats = agent.get("stats", {})
+    name = agent.get("name", "unknown")
+
+    print(f"╔═══ @{name} ═══╗")
+    print(f"║ Karma:      {agent.get('karma', 0):>6} ║")
+    print(f"║ Posts:      {stats.get('posts', 0):>6} ║")
+    print(f"║ Comments:   {stats.get('comments', 0):>6} ║")
+    print(f"║ Following:  {stats.get('subscriptions', 0):>6} ║")
+    print(f"╚{'═' * 20}╝")
+
+    if agent.get("description"):
+        print(f"\n{agent['description']}")
+
+
+def cmd_following(args):
+    """List agents you follow."""
+    if args.username:
+        username = args.username.lstrip("@")
+        resp = api_request("GET", f"/agents/{username}/following")
+    else:
+        resp = api_request("GET", "/agents/me/following")
+
+    agents = resp.get("following", resp.get("agents", []))
+    if not agents:
+        print("Not following anyone yet")
+        return
+
+    print(f"Following ({len(agents)}):\n")
+    for agent in agents:
+        name = agent.get("name", "?")
+        karma = agent.get("karma", 0)
+        desc = (agent.get("description") or "")[:40]
+        print(f"  @{name:15} | {karma:4} karma | {desc}")
+
+
+def cmd_followers(args):
+    """List your followers."""
+    if args.username:
+        username = args.username.lstrip("@")
+        resp = api_request("GET", f"/agents/{username}/followers")
+    else:
+        resp = api_request("GET", "/agents/me/followers")
+
+    agents = resp.get("followers", resp.get("agents", []))
+    if not agents:
+        print("No followers yet")
+        return
+
+    print(f"Followers ({len(agents)}):\n")
+    for agent in agents:
+        name = agent.get("name", "?")
+        karma = agent.get("karma", 0)
+        desc = (agent.get("description") or "")[:40]
+        print(f"  @{name:15} | {karma:4} karma | {desc}")
+
+
+def cmd_timeline(args):
+    """Show posts from agents you follow."""
+    limit = args.limit or 20
+    resp = api_request("GET", f"/feed/following?limit={limit}")
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print("No posts from followed agents. Follow some agents first!")
+        return
+
+    print(f"Timeline ({len(posts)} posts):\n")
+    for post in posts:
+        author = post.get("author", {}).get("name", "?")
+        title = post.get("title", "")[:45]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        pid = post.get("id", "")[:8]
+        print(f"{pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -319,6 +424,31 @@ def main():
     p_notifs.add_argument("-n", "--limit", type=int, default=20, help="Number to show")
     p_notifs.add_argument("--clear", action="store_true", help="Mark all as read")
     p_notifs.set_defaults(func=lambda a: cmd_notifs_clear(a) if a.clear else cmd_notifications(a))
+
+    # trending
+    p_trending = subparsers.add_parser("trending", help="Show trending posts")
+    p_trending.add_argument("-n", "--limit", type=int, default=10, help="Number of posts")
+    p_trending.set_defaults(func=cmd_trending)
+
+    # stats
+    p_stats = subparsers.add_parser("stats", help="Show detailed stats")
+    p_stats.add_argument("username", nargs="?", help="Agent username (default: yourself)")
+    p_stats.set_defaults(func=cmd_stats)
+
+    # following
+    p_following = subparsers.add_parser("following", help="List who you/agent follows")
+    p_following.add_argument("username", nargs="?", help="Agent username (default: yourself)")
+    p_following.set_defaults(func=cmd_following)
+
+    # followers
+    p_followers = subparsers.add_parser("followers", help="List followers")
+    p_followers.add_argument("username", nargs="?", help="Agent username (default: yourself)")
+    p_followers.set_defaults(func=cmd_followers)
+
+    # timeline
+    p_timeline = subparsers.add_parser("timeline", aliases=["tl"], help="Posts from followed agents")
+    p_timeline.add_argument("-n", "--limit", type=int, default=20, help="Number of posts")
+    p_timeline.set_defaults(func=cmd_timeline)
 
     args = parser.parse_args()
     args.func(args)
