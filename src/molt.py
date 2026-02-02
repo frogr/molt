@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -573,6 +573,99 @@ def cmd_submolts(args):
         desc = (s.get("description") or "")[:40]
         members = s.get("member_count", 0)
         print(f"  m/{name:15} | {members:4} members | {desc}")
+
+
+def cmd_submolt_view(args):
+    """View posts from a specific submolt."""
+    submolt_name = args.name.lstrip("m/").lstrip("s/")
+    limit = args.limit or 20
+    sort = args.sort or "new"
+
+    # Fetch posts filtered by submolt
+    resp = api_request_safe("GET", f"/posts?limit={limit}&sort={sort}&submolt={submolt_name}")
+    if not resp:
+        print(f"Could not fetch posts from m/{submolt_name}")
+        return
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print(f"No posts in m/{submolt_name}")
+        return
+
+    print(f"m/{submolt_name} ({len(posts)} posts, sorted by {sort}):\n")
+    for post in posts:
+        author = post.get("author", {}).get("name", "?")
+        title = post.get("title", "")[:45]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comment_count", 0)
+        full_id = post.get("id", "")
+        pid = full_id[:8]
+        cache_post(full_id, author)
+        print(f"{pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
+
+
+def cmd_random(args):
+    """Get a random post for engagement discovery."""
+    import random as rand_mod
+
+    # Fetch a pool of posts to pick from
+    pool_size = 50
+    resp = api_request_safe("GET", f"/posts?limit={pool_size}&sort=new")
+    if not resp:
+        print("Could not fetch posts")
+        return
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print("No posts found")
+        return
+
+    # Filter by criteria if specified
+    if args.min_upvotes:
+        posts = [p for p in posts if p.get("upvotes", 0) >= args.min_upvotes]
+    if args.max_upvotes:
+        posts = [p for p in posts if p.get("upvotes", 0) <= args.max_upvotes]
+    if args.has_comments:
+        posts = [p for p in posts if p.get("comment_count", 0) > 0]
+    if args.no_comments:
+        posts = [p for p in posts if p.get("comment_count", 0) == 0]
+
+    if not posts:
+        print("No posts match the criteria")
+        return
+
+    # Pick random post(s)
+    count = min(args.count or 1, len(posts))
+    selected = rand_mod.sample(posts, count)
+
+    if count == 1:
+        # Show full details for single post
+        post = selected[0]
+        author = post.get("author", {}).get("name", "?")
+        full_id = post.get("id", "")
+        cache_post(full_id, author)
+
+        print(f"# {post.get('title')}")
+        print(f"by @{author} | ⬆{post.get('upvotes', 0)} | {post.get('comment_count', 0)} comments")
+        print(f"ID: {full_id[:8]}")
+        print()
+        content = post.get("content", "")[:500]
+        if content:
+            print(content)
+            if len(post.get("content", "")) > 500:
+                print("...")
+    else:
+        # Show list for multiple
+        print(f"Random posts ({count}):\n")
+        for post in selected:
+            author = post.get("author", {}).get("name", "?")
+            title = post.get("title", "")[:45]
+            ups = post.get("upvotes", 0)
+            comments = post.get("comment_count", 0)
+            full_id = post.get("id", "")
+            pid = full_id[:8]
+            cache_post(full_id, author)
+            print(f"{pid} | @{author:12} | {ups:3}↑ {comments:2}💬 | {title}")
 
 
 def load_bookmarks():
@@ -1407,6 +1500,22 @@ def main():
     # submolts
     p_submolts = subparsers.add_parser("submolts", aliases=["subs"], help="List available submolts")
     p_submolts.set_defaults(func=cmd_submolts)
+
+    # submolt - view posts from a specific submolt
+    p_submolt = subparsers.add_parser("submolt", aliases=["sub"], help="View posts from a specific submolt")
+    p_submolt.add_argument("name", help="Submolt name (e.g., 'general' or 'm/general')")
+    p_submolt.add_argument("-n", "--limit", type=int, default=20, help="Number of posts")
+    p_submolt.add_argument("-s", "--sort", choices=["new", "hot", "top"], default="new", help="Sort order")
+    p_submolt.set_defaults(func=cmd_submolt_view)
+
+    # random - get random post for engagement discovery
+    p_random = subparsers.add_parser("random", aliases=["rand"], help="Get random post(s) for engagement discovery")
+    p_random.add_argument("-c", "--count", type=int, default=1, help="Number of random posts (default: 1)")
+    p_random.add_argument("--min-upvotes", type=int, help="Minimum upvotes")
+    p_random.add_argument("--max-upvotes", type=int, help="Maximum upvotes")
+    p_random.add_argument("--has-comments", action="store_true", help="Only posts with comments")
+    p_random.add_argument("--no-comments", action="store_true", help="Only posts without comments")
+    p_random.set_defaults(func=cmd_random)
 
     # digest
     p_digest = subparsers.add_parser("digest", help="Quick daily digest of stats, notifications, trending")
