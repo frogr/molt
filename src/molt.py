@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -224,6 +224,36 @@ def cmd_comment(args):
     resp = api_request("POST", f"/posts/{post_id}/comments", data)
     if resp.get("success"):
         print(f"Commented! {resp.get('message', '')}")
+    else:
+        print(f"Failed: {resp.get('error')}")
+
+
+def cmd_delete(args):
+    """Delete your own post."""
+    post_id = resolve_post_id(args.post_id)
+
+    if not args.yes:
+        # Fetch post info first to show what we're deleting
+        try:
+            resp = api_request("GET", f"/posts/{post_id}")
+            post = resp.get("post", {})
+            title = post.get("title", "Unknown")
+            print(f"Delete post: \"{title}\"?")
+            print(f"This cannot be undone.")
+            confirm = input("Type 'yes' to confirm: ")
+            if confirm.lower() != "yes":
+                print("Cancelled.")
+                return
+        except SystemExit:
+            print("Could not fetch post info. Delete anyway?")
+            confirm = input("Type 'yes' to confirm: ")
+            if confirm.lower() != "yes":
+                print("Cancelled.")
+                return
+
+    resp = api_request("DELETE", f"/posts/{post_id}")
+    if resp.get("success"):
+        print(f"Deleted post {post_id[:8]}")
     else:
         print(f"Failed: {resp.get('error')}")
 
@@ -1033,6 +1063,47 @@ def cmd_context(args):
                 print(f"  {p['id']} @{p['author']}: {p['title']}")
 
 
+def cmd_agents(args):
+    """Show top agents / leaderboard."""
+    limit = args.limit or 20
+    sort = args.sort or "karma"
+
+    # Map sort parameter to API parameter
+    sort_map = {"karma": "karma", "recent": "recent", "posts": "posts"}
+    api_sort = sort_map.get(sort, "karma")
+
+    resp = api_request_safe("GET", f"/agents?limit={limit}&sort={api_sort}")
+    if not resp:
+        print("Could not fetch agents")
+        return
+
+    agents = resp.get("agents", [])
+    if not agents:
+        print("No agents found")
+        return
+
+    title = "Leaderboard" if sort == "karma" else f"Agents (by {sort})"
+    print(f"=== {title} ===\n")
+
+    for i, agent in enumerate(agents, 1):
+        name = agent.get("name", "?")
+        karma = agent.get("karma", 0)
+        stats = agent.get("stats", {})
+        posts = stats.get("posts", 0)
+        comments = stats.get("comments", 0)
+        desc = (agent.get("description") or "")[:35]
+
+        # Rank formatting
+        if i <= 3:
+            rank = ["", "1st", "2nd", "3rd"][i]
+        else:
+            rank = f"{i}th"
+
+        print(f"{rank:>4} | @{name:15} | {karma:>4} karma | {posts:>3}p {comments:>3}c | {desc}")
+
+    print(f"\n=== {len(agents)} agents shown ===")
+
+
 def cmd_analyze(args):
     """Analyze recent feed activity for patterns and opportunities."""
     from collections import Counter
@@ -1260,6 +1331,12 @@ def main():
     p_comment.add_argument("text", help="Comment text")
     p_comment.set_defaults(func=cmd_comment)
 
+    # delete
+    p_delete = subparsers.add_parser("delete", help="Delete your own post")
+    p_delete.add_argument("post_id", help="Post ID to delete")
+    p_delete.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    p_delete.set_defaults(func=cmd_delete)
+
     # read
     p_read = subparsers.add_parser("read", help="Read a post")
     p_read.add_argument("post_id", help="Post ID")
@@ -1406,6 +1483,12 @@ def main():
     p_export.add_argument("-n", "--limit", type=int, default=100, help="Max posts to export")
     p_export.add_argument("-b", "--bookmarks", action="store_true", help="Also export bookmarks")
     p_export.set_defaults(func=cmd_export)
+
+    # agents - leaderboard / top agents
+    p_agents = subparsers.add_parser("agents", aliases=["leaderboard", "lb"], help="Show top agents / leaderboard")
+    p_agents.add_argument("-n", "--limit", type=int, default=20, help="Number of agents")
+    p_agents.add_argument("-s", "--sort", choices=["karma", "recent", "posts"], default="karma", help="Sort by")
+    p_agents.set_defaults(func=cmd_agents)
 
     # analyze - analyze feed for patterns
     p_analyze = subparsers.add_parser("analyze", help="Analyze feed for patterns and opportunities")
