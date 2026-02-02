@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -151,6 +151,60 @@ def cmd_read(args):
     print(post.get("content", ""))
 
 
+def cmd_follow(args):
+    """Follow an agent."""
+    username = args.username.lstrip("@")
+    resp = api_request("POST", f"/agents/{username}/follow")
+    if resp.get("success"):
+        print(f"Now following @{username}")
+    else:
+        print(f"Failed: {resp.get('error')}")
+
+
+def cmd_unfollow(args):
+    """Unfollow an agent."""
+    username = args.username.lstrip("@")
+    resp = api_request("POST", f"/agents/{username}/unfollow")
+    if resp.get("success"):
+        print(f"Unfollowed @{username}")
+    else:
+        print(f"Failed: {resp.get('error')}")
+
+
+def cmd_agent(args):
+    """View an agent's profile."""
+    username = args.username.lstrip("@")
+    resp = api_request("GET", f"/agents/{username}")
+    agent = resp.get("agent", {})
+    stats = agent.get("stats", {})
+
+    print(f"@{agent.get('name')}")
+    print(f"Karma: {agent.get('karma', 0)}")
+    print(f"Posts: {stats.get('posts', 0)} | Comments: {stats.get('comments', 0)}")
+    if agent.get('description'):
+        print(f"\n{agent['description']}")
+
+
+def cmd_search(args):
+    """Search posts."""
+    query = args.query
+    limit = args.limit or 10
+    resp = api_request("GET", f"/posts/search?q={query}&limit={limit}")
+
+    posts = resp.get("posts", [])
+    if not posts:
+        print(f"No posts found for '{query}'")
+        return
+
+    print(f"Found {len(posts)} posts:\n")
+    for post in posts:
+        author = post.get("author", {}).get("name", "?")
+        title = post.get("title", "")[:50]
+        ups = post.get("upvotes", 0)
+        pid = post.get("id", "")[:8]
+        print(f"{pid} | @{author:15} | ⬆{ups:4} | {title}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="molt",
@@ -197,6 +251,27 @@ def main():
     p_read = subparsers.add_parser("read", help="Read a post")
     p_read.add_argument("post_id", help="Post ID")
     p_read.set_defaults(func=cmd_read)
+
+    # follow
+    p_follow = subparsers.add_parser("follow", help="Follow an agent")
+    p_follow.add_argument("username", help="Agent username (with or without @)")
+    p_follow.set_defaults(func=cmd_follow)
+
+    # unfollow
+    p_unfollow = subparsers.add_parser("unfollow", help="Unfollow an agent")
+    p_unfollow.add_argument("username", help="Agent username")
+    p_unfollow.set_defaults(func=cmd_unfollow)
+
+    # agent
+    p_agent = subparsers.add_parser("agent", help="View agent profile")
+    p_agent.add_argument("username", help="Agent username")
+    p_agent.set_defaults(func=cmd_agent)
+
+    # search
+    p_search = subparsers.add_parser("search", help="Search posts")
+    p_search.add_argument("query", help="Search query")
+    p_search.add_argument("-n", "--limit", type=int, default=10, help="Number of results")
+    p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
     args.func(args)
