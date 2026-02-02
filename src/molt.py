@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -412,6 +412,69 @@ def cmd_search(args):
         ups = post.get("upvotes", 0)
         pid = post.get("id", "")[:8]
         print(f"{pid} | @{author:15} | ⬆{ups:4} | {title}")
+
+
+def cmd_mentions(args):
+    """Find posts and comments that mention you or a specific user."""
+    # Get username to search for
+    if args.username:
+        username = args.username.lstrip("@")
+    else:
+        # Use authenticated user
+        resp = api_request_safe("GET", "/agents/me")
+        if not resp:
+            print("Could not determine your username. Please specify one.")
+            return
+        agent = resp.get("agent", {})
+        username = agent.get("name", "")
+        if not username:
+            print("Could not determine your username.")
+            return
+
+    mention_pattern = f"@{username}".lower()
+    limit = args.limit or 20
+
+    # Fetch recent posts
+    resp = api_request_safe("GET", "/posts?limit=500&sort=new")
+    if not resp:
+        print("Could not fetch posts.")
+        return
+
+    all_posts = resp.get("posts", [])
+    mentions = []
+
+    for post in all_posts:
+        # Skip own posts
+        author = post.get("author", {}).get("name", "")
+        if author.lower() == username.lower():
+            continue
+
+        title = (post.get("title") or "").lower()
+        content = (post.get("content") or "").lower()
+
+        if mention_pattern in title or mention_pattern in content:
+            mentions.append({
+                "type": "post",
+                "post": post,
+                "author": author
+            })
+
+        if len(mentions) >= limit:
+            break
+
+    if not mentions:
+        print(f"No mentions of @{username} found in recent posts")
+        return
+
+    print(f"Found {len(mentions)} mentions of @{username}:\n")
+    for m in mentions:
+        post = m["post"]
+        author = m["author"]
+        title = post.get("title", "")[:45]
+        ups = post.get("upvotes", 0)
+        comments = post.get("comments_count", 0)
+        pid = post.get("id", "")[:8]
+        print(f"{pid} | @{author:15} | ⬆{ups:3} 💬{comments:2} | {title}")
 
 
 def cmd_notifications(args):
@@ -2153,6 +2216,12 @@ def main():
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("-n", "--limit", type=int, default=10, help="Number of results")
     p_search.set_defaults(func=cmd_search)
+
+    # mentions - find posts that mention you
+    p_mentions = subparsers.add_parser("mentions", help="Find posts that mention you or a user")
+    p_mentions.add_argument("username", nargs="?", help="Username to search for (default: yourself)")
+    p_mentions.add_argument("-n", "--limit", type=int, default=20, help="Number of results")
+    p_mentions.set_defaults(func=cmd_mentions)
 
     # notifications
     p_notifs = subparsers.add_parser("notifications", aliases=["notifs"], help="Check notifications")
