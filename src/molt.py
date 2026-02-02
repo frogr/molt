@@ -12,11 +12,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 CONFIG_DIR = Path.home() / ".molt"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 POST_CACHE = CONFIG_DIR / "post_cache.json"
+BOOKMARKS_FILE = CONFIG_DIR / "bookmarks.json"
 API_BASE = "https://www.moltbook.com/api/v1"
 
 # Default signature - can be overridden in config
@@ -493,6 +494,103 @@ def cmd_submolts(args):
         print(f"  m/{name:15} | {members:4} members | {desc}")
 
 
+def load_bookmarks():
+    """Load bookmarks from disk."""
+    if not BOOKMARKS_FILE.exists():
+        return []
+    try:
+        with open(BOOKMARKS_FILE) as f:
+            return json.load(f)
+    except:
+        return []
+
+
+def save_bookmarks(bookmarks):
+    """Save bookmarks to disk."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    with open(BOOKMARKS_FILE, "w") as f:
+        json.dump(bookmarks, f, indent=2)
+
+
+def cmd_bookmark_add(args):
+    """Bookmark a post to read later."""
+    import time
+    post_id = resolve_post_id(args.post_id)
+
+    # Fetch post info
+    try:
+        resp = api_request("GET", f"/posts/{post_id}")
+        post = resp.get("post", {})
+        author = post.get("author", {}).get("name", "?")
+        title = post.get("title", "")[:60]
+    except SystemExit:
+        author = "?"
+        title = "?"
+
+    bookmarks = load_bookmarks()
+
+    # Check if already bookmarked
+    for b in bookmarks:
+        if b.get("id") == post_id or b.get("id", "")[:8] == args.post_id[:8]:
+            print(f"Already bookmarked: {title}")
+            return
+
+    bookmarks.append({
+        "id": post_id,
+        "author": author,
+        "title": title,
+        "note": args.note,
+        "saved_at": int(time.time())
+    })
+    save_bookmarks(bookmarks)
+    print(f"Bookmarked: {title}")
+
+
+def cmd_bookmark_list(args):
+    """List bookmarked posts."""
+    bookmarks = load_bookmarks()
+
+    if not bookmarks:
+        print("No bookmarks yet. Use 'molt bookmark <post_id>' to save posts.")
+        return
+
+    print(f"Bookmarks ({len(bookmarks)}):\n")
+    for b in bookmarks:
+        pid = b.get("id", "")[:8]
+        author = b.get("author", "?")
+        title = b.get("title", "")[:45]
+        note = b.get("note", "")
+        print(f"  {pid} | @{author:12} | {title}")
+        if note:
+            print(f"         └─ {note}")
+
+
+def cmd_bookmark_remove(args):
+    """Remove a bookmark."""
+    post_id = args.post_id
+    bookmarks = load_bookmarks()
+
+    original_len = len(bookmarks)
+    bookmarks = [b for b in bookmarks if not (b.get("id") == post_id or b.get("id", "")[:8] == post_id[:8])]
+
+    if len(bookmarks) < original_len:
+        save_bookmarks(bookmarks)
+        print(f"Removed bookmark")
+    else:
+        print(f"Bookmark not found: {post_id}")
+
+
+def cmd_bookmarks_clear(args):
+    """Clear all bookmarks."""
+    bookmarks = load_bookmarks()
+    count = len(bookmarks)
+    if count == 0:
+        print("No bookmarks to clear")
+        return
+    save_bookmarks([])
+    print(f"Cleared {count} bookmarks")
+
+
 def api_request_safe(method, endpoint, data=None):
     """Make API request that returns None on error instead of exiting."""
     url = f"{API_BASE}{endpoint}"
@@ -747,6 +845,25 @@ def main():
     p_watch.add_argument("-i", "--interval", type=int, default=30, help="Poll interval in seconds (default: 30)")
     p_watch.add_argument("-v", "--verbose", action="store_true", help="Show 'no new posts' messages")
     p_watch.set_defaults(func=cmd_watch)
+
+    # bookmark - simple commands, no subparsers for easier use
+    p_bm = subparsers.add_parser("bookmark", aliases=["bm"], help="Bookmark a post for later")
+    p_bm.add_argument("post_id", help="Post ID to bookmark")
+    p_bm.add_argument("-n", "--note", help="Optional note about the bookmark")
+    p_bm.set_defaults(func=cmd_bookmark_add)
+
+    # bookmarks - list all
+    p_bms = subparsers.add_parser("bookmarks", aliases=["bms"], help="List bookmarked posts")
+    p_bms.set_defaults(func=cmd_bookmark_list)
+
+    # unbookmark - remove
+    p_unbm = subparsers.add_parser("unbookmark", aliases=["unbm"], help="Remove a bookmark")
+    p_unbm.add_argument("post_id", help="Post ID to remove")
+    p_unbm.set_defaults(func=cmd_bookmark_remove)
+
+    # bookmarks-clear
+    p_bms_clear = subparsers.add_parser("bookmarks-clear", help="Clear all bookmarks")
+    p_bms_clear.set_defaults(func=cmd_bookmarks_clear)
 
     args = parser.parse_args()
     args.func(args)
