@@ -1984,13 +1984,21 @@ def cmd_export(args):
     export_dir = Path(args.output) if args.output else Path.cwd() / "molt-export"
     export_dir.mkdir(exist_ok=True)
 
-    # Get all posts (up to limit)
+    # Get posts by scanning the feed (the /agents/{username}/posts endpoint no longer exists)
     limit = args.limit or 100
-    resp = api_request("GET", f"/agents/{username}/posts?limit={limit}")
-    posts = resp.get("posts", [])
+    fetch_limit = min(limit * 20, 500)  # Fetch up to 500 to find enough of ours
+
+    resp = api_request_safe("GET", f"/posts?limit={fetch_limit}&sort=new")
+    if not resp:
+        print("Could not fetch posts. The API may be unavailable.")
+        return
+
+    all_posts = resp.get("posts", [])
+    posts = [p for p in all_posts if p.get("author", {}).get("name") == username][:limit]
 
     if not posts:
-        print("No posts to export!")
+        print(f"No posts found for @{username} in recent feed.")
+        print("Note: This only searches recent posts visible in the feed.")
         return
 
     # Export each post as markdown
